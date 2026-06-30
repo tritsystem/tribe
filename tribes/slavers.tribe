@@ -1,0 +1,20 @@
+archetype: Slavers
+material: Obsidian
+
+traits:
+  aggression: 0.15
+  greed: 0.2
+  honor: -0.2
+  paranoia: 0.05
+
+speech:
+  hostile: "You'd make a fine chain-hand."
+  neutral: "What's your price, wanderer?"
+  friendly: "You pay your debts. Rare, that."
+  trusted: "We deal fair with you — for now."
+  bonded: "Partners in trade. Don't make us regret it."
+
+quests:
+  friendly: gather, scout
+  trusted: raid escort, capture
+  bonded: tribe war, sacred mission

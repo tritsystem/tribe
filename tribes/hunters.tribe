@@ -1,0 +1,20 @@
+archetype: Hunters
+material: Bone
+
+traits:
+  aggression: 0.1
+  greed: 0.0
+  honor: 0.0
+  paranoia: 0.0
+
+speech:
+  hostile: "You've wandered into our hunting ground."
+  neutral: "Quiet. You'll scare the game."
+  friendly: "A steady hand. Hunt with us sometime."
+  trusted: "The hunt favors you. Welcome to the lodge."
+  bonded: "Pack-kin. We hunt as one now."
+
+quests:
+  friendly: hunt, gather
+  trusted: raid escort, track beast
+  bonded: tribe war, sacred mission

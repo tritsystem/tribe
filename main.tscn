@@ -1,0 +1,113 @@
+[gd_scene format=3 uid="uid://b488txj7g0va5"]
+
+[ext_resource type="Script" uid="uid://bcgx0xgaxnb0q" path="res://FPSPlayer.gd" id="1_player"]
+[ext_resource type="Script" uid="uid://beo0artxvk62r" path="res://tribemember.gd" id="2_member"]
+[ext_resource type="Script" uid="uid://gs54ik6sbr0l" path="res://Tribemanager.gd" id="3_manager"]
+
+[sub_resource type="Environment" id="Env"]
+background_mode = 1
+background_color = Color(0.4, 0.6, 0.75, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.6, 0.65, 0.7, 1)
+ambient_light_energy = 0.6
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_floor"]
+size = Vector2(360, 360)
+
+[sub_resource type="StandardMaterial3D" id="Mat_floor"]
+albedo_color = Color(0.18, 0.32, 0.16, 1)
+
+[sub_resource type="BoxShape3D" id="Box_floor"]
+size = Vector3(360, 0.2, 360)
+
+[sub_resource type="CapsuleShape3D" id="Capsule_player_col"]
+radius = 0.4
+height = 1.8
+
+[sub_resource type="CapsuleMesh" id="Capsule_member"]
+
+[sub_resource type="StandardMaterial3D" id="Mat_member"]
+albedo_color = Color(0.7, 0.55, 0.4, 1)
+
+[sub_resource type="SphereShape3D" id="Sphere_interact"]
+radius = 3.0
+
+[sub_resource type="CapsuleShape3D" id="Capsule_member_col"]
+
+[node name="Main" type="Node3D" unique_id=1738517123]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1208745615]
+environment = SubResource("Env")
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=436880449]
+transform = Transform3D(0.7, -0.5, 0.5, 0, 0.7, 0.7, -0.7, -0.5, 0.5, 0, 8, 0)
+shadow_enabled = true
+
+[node name="Floor" type="StaticBody3D" parent="." unique_id=1639273813]
+
+[node name="Mesh" type="MeshInstance3D" parent="Floor" unique_id=414947536]
+mesh = SubResource("PlaneMesh_floor")
+surface_material_override/0 = SubResource("Mat_floor")
+
+[node name="Collision" type="CollisionShape3D" parent="Floor" unique_id=1952736002]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
+shape = SubResource("Box_floor")
+
+[node name="Player" type="CharacterBody3D" parent="." unique_id=626963081]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 5)
+script = ExtResource("1_player")
+
+[node name="Collision" type="CollisionShape3D" parent="Player" unique_id=553917784]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("Capsule_player_col")
+
+[node name="Camera3D" type="Camera3D" parent="Player" unique_id=172543756]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
+
+[node name="TribeManager" type="Node3D" parent="." unique_id=1918481209]
+script = ExtResource("3_manager")
+
+[node name="TribeMember" type="CharacterBody3D" parent="TribeManager" unique_id=870712628]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, -2)
+script = ExtResource("2_member")
+
+[node name="Mesh" type="MeshInstance3D" parent="TribeManager/TribeMember" unique_id=1136862211]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+mesh = SubResource("Capsule_member")
+surface_material_override/0 = SubResource("Mat_member")
+
+[node name="TrustLabel" type="Label3D" parent="TribeManager/TribeMember" unique_id=650833742]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.6, 0)
+billboard = 1
+text = "Tribesman
+Trust: 0%"
+
+[node name="ThoughtLabel" type="Label3D" parent="TribeManager/TribeMember" unique_id=383377718]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.3, 0)
+billboard = 1
+modulate = Color(0.85, 0.9, 1, 1)
+text = "..."
+outline_size = 8
+
+[node name="InteractArea" type="Area3D" parent="TribeManager/TribeMember" unique_id=1327935896]
+
+[node name="Collision" type="CollisionShape3D" parent="TribeManager/TribeMember/InteractArea" unique_id=1456389483]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+shape = SubResource("Sphere_interact")
+
+[node name="BodyCollision" type="CollisionShape3D" parent="TribeManager/TribeMember" unique_id=524635340]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+shape = SubResource("Capsule_member_col")
+
+[node name="UI" type="CanvasLayer" parent="." unique_id=1155093651]
+
+[node name="TribeStatus" type="Label" parent="UI" unique_id=1630973419]
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 760.0
+offset_bottom = 90.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 6
+theme_override_font_sizes/font_size = 20
+text = "TRIBE: earn trust to lead  |  0/0 members backing you (need 3)"

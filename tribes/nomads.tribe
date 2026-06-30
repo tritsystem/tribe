@@ -1,0 +1,20 @@
+archetype: Nomads
+material: Bone
+
+traits:
+  aggression: 0.0
+  greed: -0.1
+  honor: 0.05
+  paranoia: -0.05
+
+speech:
+  hostile: "We move on. You should too."
+  neutral: "Passing through, are you?"
+  friendly: "The road's kinder with company."
+  trusted: "Ride with our caravan a while."
+  bonded: "Road-kin. Wherever we go, you've a place in the column."
+
+quests:
+  friendly: gather, scout
+  trusted: raid escort, guide caravan
+  bonded: tribe war, sacred mission

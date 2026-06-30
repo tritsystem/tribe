@@ -1,0 +1,20 @@
+archetype: Wanderers
+material: Stone
+
+traits:
+  aggression: -0.15
+  greed: -0.1
+  honor: 0.0
+  paranoia: -0.15
+
+speech:
+  hostile: "We want no trouble. Truly."
+  neutral: "Just passing, friend."
+  friendly: "Good to see a kind face out here."
+  trusted: "You're family on the road now."
+  bonded: "Bonded by the long road. We'd follow you anywhere."
+
+quests:
+  friendly: gather, scout
+  trusted: raid escort, find the lost
+  bonded: tribe war, sacred mission

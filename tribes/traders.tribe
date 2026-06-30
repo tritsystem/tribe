@@ -1,0 +1,20 @@
+archetype: Traders
+material: Bronze
+
+traits:
+  aggression: -0.2
+  greed: 0.2
+  honor: 0.1
+  paranoia: 0.0
+
+speech:
+  hostile: "We've nothing for you. Move along."
+  neutral: "Buying or selling?"
+  friendly: "Good rates, for a friend."
+  trusted: "Our caravans are yours to ride."
+  bonded: "Partner in the ledger and the blade alike."
+
+quests:
+  friendly: gather, scout
+  trusted: raid escort, escort caravan
+  bonded: tribe war, sacred mission

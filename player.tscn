@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://cg50kowrhfepi"]
+
+[ext_resource type="Script" uid="uid://bcgx0xgaxnb0q" path="res://FPSPlayer.gd" id="1_4flbx"]
+
+[node name="player" type="Node3D" unique_id=578021215]
+script = ExtResource("1_4flbx")

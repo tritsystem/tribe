@@ -1,0 +1,20 @@
+archetype: Mystics
+material: Glass
+
+traits:
+  aggression: -0.15
+  greed: 0.0
+  honor: 0.0
+  paranoia: -0.1
+
+speech:
+  hostile: "The spirits warn us of you."
+  neutral: "What do you seek here, traveler?"
+  friendly: "The spirits speak well of you."
+  trusted: "You may walk the sacred ground."
+  bonded: "Spirit-bound. We see as you see now."
+
+quests:
+  friendly: gather, scout
+  trusted: raid escort, sacred rite
+  bonded: tribe war, sacred mission

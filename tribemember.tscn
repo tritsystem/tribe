@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://38b6gxggmlud"]
+
+[ext_resource type="Script" uid="uid://duoqbbvibaese" path="res://tribemember.gd" id="1_ja6nn"]
+
+[node name="tribemember" type="Node3D" unique_id=471999783]
+script = ExtResource("1_ja6nn")

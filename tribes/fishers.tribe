@@ -1,0 +1,20 @@
+archetype: Fishers
+material: Bronze
+
+traits:
+  aggression: -0.1
+  greed: 0.0
+  honor: 0.0
+  paranoia: 0.0
+
+speech:
+  hostile: "These waters are spoken for."
+  neutral: "Mind the nets, stranger."
+  friendly: "Good catch today. Sit, eat."
+  trusted: "Our boats are yours when you need them."
+  bonded: "Tide-kin. We never let you go hungry."
+
+quests:
+  friendly: gather, hunt
+  trusted: raid escort, clear the shoals
+  bonded: tribe war, sacred mission

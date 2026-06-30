@@ -1,0 +1,20 @@
+archetype: Raiders
+material: Obsidian
+
+traits:
+  aggression: 0.25
+  greed: 0.05
+  honor: -0.1
+  paranoia: 0.1
+
+speech:
+  hostile: "Leave our lands, or feed the fire."
+  neutral: "State your purpose, stranger."
+  friendly: "You strike hard. We respect that."
+  trusted: "Walk freely among the Raiders."
+  bonded: "Blood-kin. Your enemies are ours now."
+
+quests:
+  friendly: hunt, gather
+  trusted: raid escort, scout enemy camp
+  bonded: tribe war, assassination

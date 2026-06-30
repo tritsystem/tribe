@@ -1,0 +1,20 @@
+archetype: Warriors
+material: Obsidian
+
+traits:
+  aggression: 0.2
+  greed: 0.0
+  honor: 0.15
+  paranoia: 0.0
+
+speech:
+  hostile: "Draw steel, or draw back."
+  neutral: "Speak quickly. We've no patience for games."
+  friendly: "You fight with honor. Stand with us."
+  trusted: "Our shield wall has a place for you."
+  bonded: "Shield-brother. We march together or not at all."
+
+quests:
+  friendly: hunt, gather
+  trusted: raid escort, duel
+  bonded: tribe war, sacred mission

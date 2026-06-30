@@ -1,0 +1,20 @@
+archetype: Herders
+material: Bone
+
+traits:
+  aggression: -0.15
+  greed: 0.0
+  honor: 0.0
+  paranoia: 0.0
+
+speech:
+  hostile: "Don't spook the herd."
+  neutral: "Slow steps, here."
+  friendly: "Gentle with the animals. We like that."
+  trusted: "Walk among our herds as one of our own."
+  bonded: "Herd-kin. What's ours grazes for you too."
+
+quests:
+  friendly: gather, hunt
+  trusted: raid escort, recover stray
+  bonded: tribe war, sacred mission

@@ -1,0 +1,20 @@
+archetype: Foragers
+material: Bone
+
+traits:
+  aggression: -0.1
+  greed: 0.0
+  honor: 0.0
+  paranoia: 0.0
+
+speech:
+  hostile: "These groves feed our children. Go."
+  neutral: "Careful where you step."
+  friendly: "You know which berries are safe. Good."
+  trusted: "The good groves are open to you now."
+  bonded: "Root-kin. What grows here grows for you too."
+
+quests:
+  friendly: gather, scout
+  trusted: raid escort, clear pests
+  bonded: tribe war, sacred mission

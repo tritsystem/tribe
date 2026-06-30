@@ -1,0 +1,10 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# Build output / shipped binaries — rebuild via Godot export, don't track
+tribe.exe
+tribe.console.exe
+tribe.pck
+dist/
+build/

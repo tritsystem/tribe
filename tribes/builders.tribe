@@ -1,0 +1,20 @@
+archetype: Builders
+material: Glass
+
+traits:
+  aggression: -0.1
+  greed: 0.1
+  honor: 0.0
+  paranoia: 0.0
+
+speech:
+  hostile: "You'll not tear down what we've raised."
+  neutral: "Mind the scaffolding, stranger."
+  friendly: "A steady pair of hands. Good."
+  trusted: "Our walls stand a little stronger with you near."
+  bonded: "Kin of the foundation-stone. Build with us always."
+
+quests:
+  friendly: gather, build
+  trusted: raid escort, raise structure
+  bonded: tribe war, sacred mission
