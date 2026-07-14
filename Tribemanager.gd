@@ -53,6 +53,7 @@ var lost: bool           = false
 var is_leader: bool      = false
 var backers: int         = 0
 var _loser_name: String  = ""
+var _name_cursor: int    = 0
 
 # economy / morale
 var food: int       = 0
@@ -166,6 +167,10 @@ const FACTION_COLORS := [
 
 const PERSONALITY_POOL := ["Steady", "Trusting", "Wary", "Brave", "Greedy"]
 const ANIMAL_POOL      := ["Rabbit", "Rabbit", "Deer", "Deer", "Deer", "Boar"]
+const MEMBER_NAMES := [
+	"Ka", "Bo", "Tam", "Ru", "Sef", "Mok", "Wen", "Lir",
+	"Dak", "Fenn", "Vel", "Orra", "Kin", "Zol", "Brae", "Cael",
+]
 
 const ARCHETYPES := [
 	"Foragers", "Hunters", "Raiders", "Traders", "Nomads", "Warriors",
@@ -229,9 +234,11 @@ var help_label:     Label   = null
 var player_label:   Label   = null
 var factions_label: Label   = null
 var flash_label:    Label   = null
-var ui_hint_label:  Label   = null
-var brain_panel:    Control = null
-var _ui_hidden: bool        = false
+var ui_hint_label:   Label   = null
+var _feed_hint_label: Label  = null
+var _feed_hint_alpha: float  = 1.0
+var brain_panel:     Control = null
+var _ui_hidden: bool         = false
 
 # ═════════════════════════════════════════════════════════════════════════════
 # READY
@@ -373,6 +380,10 @@ func _start_game() -> void:
 	_flash(
 		"Commands are keybinds — hold [V] looking at someone to pick them, "
 		+ "then [1-7]/[0] to order. See the bar below for the full list.", 12.0)
+	if _feed_hint_label:
+		_feed_hint_label.visible = true
+		_feed_hint_alpha = 1.0
+		_feed_hint_label.modulate = Color(1, 1, 1, 1)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DOGS
@@ -550,12 +561,11 @@ func _scatter(min_r: float, max_r: float, y: float) -> Vector3:
 # MEMBER SPAWNING
 # ─────────────────────────────────────────────────────────────────────────────
 func _spawn_members() -> void:
-	var names := ["Ka", "Bo", "Tam", "Ru", "Sef", "Mok", "Wen", "Lir"]
 	for i in range(spawn_count):
 		var ang := TAU * float(i) / float(spawn_count)
 		var pos := Vector3(cos(ang) * spawn_radius, 1.0, sin(ang) * spawn_radius)
 		_spawn_one_member(
-			names[i % names.size()],
+			_next_member_name(),
 			PERSONALITY_POOL[i % PERSONALITY_POOL.size()],
 			pos)
 
@@ -570,6 +580,11 @@ func _spawn_one_member(nm: String, pers: String, pos: Vector3) -> Node:
 	if m not in members:
 		members.append(m)
 	return m
+
+func _next_member_name() -> String:
+	var name := MEMBER_NAMES[_name_cursor % MEMBER_NAMES.size()]
+	_name_cursor += 1
+	return name
 
 func _build_member_in_code() -> Node:
 	var body := CharacterBody3D.new()
@@ -904,7 +919,7 @@ func absorb_members(count: int, pos: Vector3) -> int:
 		if members.size() >= member_cap:
 			break
 		var off := Vector3(randf_range(-3.0, 3.0), 1.0, randf_range(-3.0, 3.0))
-		var sub := _spawn_one_member("Subjugated", _random_personality(), pos + off)
+		var sub := _spawn_one_member(_next_member_name(), _random_personality(), pos + off)
 		if "relationship"   in sub: sub.relationship   = 0.3
 		if "is_backing_you" in sub: sub.is_backing_you = true
 		joined += 1
@@ -939,7 +954,7 @@ func recruit_neutral(npc) -> Node:
 		return null
 	var pos: Vector3 = npc.global_position
 	npc.queue_free()
-	var m := _spawn_one_member("Recruit", _random_personality(), pos)
+	var m := _spawn_one_member(_next_member_name(), _random_personality(), pos)
 	if "relationship" in m: m.relationship = 0.5
 	return m
 
@@ -1130,6 +1145,7 @@ func _process(delta: float) -> void:
 	_update_flash()
 	_update_player_label()
 	_update_factions_label()
+	_update_feed_hint(delta)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VICTORY / DEFEAT
@@ -1201,7 +1217,7 @@ func _recruit_tick(delta: float) -> void:
 	if _recruit_accum < 30.0: return
 	_recruit_accum = 0.0
 	if food > members.size() * 2 and members.size() < member_cap and unrest < 0.5:
-		_spawn_one_member("Wanderer", _random_personality(), _edge_position())
+		_spawn_one_member(_next_member_name(), _random_personality(), _edge_position())
 		_flash("A wanderer drifts toward your well-fed camp...")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1955,6 +1971,18 @@ func _build_ui() -> void:
 	_style_label(ui_hint_label, 14)
 	ui_hint_label.text = "[U] hide UI"
 
+	# first-run onboarding hint — visible at game start, fades permanently after
+	# the player feeds a tribe member for the first time
+	_feed_hint_label = Label.new()
+	_feed_hint_label.name = "FeedHint"
+	ui.add_child(_feed_hint_label)
+	_feed_hint_label.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_feed_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_feed_hint_label.custom_minimum_size = Vector2(700, 0)
+	_style_label(_feed_hint_label, 22)
+	_feed_hint_label.text = "Walk up to a tribe member and press [E] to give food — feeding builds trust"
+	_feed_hint_label.visible = false   # shown only once the game actually starts
+
 	# _update_ui_positions() is only ever called from _process(), which
 	# returns immediately while `_started` is false (still on the start
 	# menu) — so every label above just sits at its construction-time
@@ -1999,6 +2027,10 @@ func _update_ui_positions() -> void:
 	# BOTTOM-LEFT corner: always-visible UI toggle
 	if ui_hint_label:
 		ui_hint_label.position = Vector2(20, H - 26)
+
+	if _feed_hint_label and _feed_hint_label.visible:
+		var fw := _feed_hint_label.custom_minimum_size.x
+		_feed_hint_label.position = Vector2((W - fw) * 0.5, H * 0.38)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI — UPDATE
@@ -2057,6 +2089,20 @@ func _update_factions_label() -> void:
 		var star := "  ★%d" % int(f["backers"]) if int(f["backers"]) > 0 else ""
 		parts.append("%s(%d%s)" % [f["name"], int(f["size"]), star])
 	factions_label.text = "Sub-tribes: " + ", ".join(parts)
+
+func _update_feed_hint(delta: float) -> void:
+	if _feed_hint_label == null or not _feed_hint_label.visible:
+		return
+	var fed := false
+	for m in members:
+		if is_instance_valid(m) and int(m.get("feed_count")) > 0:
+			fed = true
+			break
+	if fed:
+		_feed_hint_alpha = maxf(0.0, _feed_hint_alpha - delta / 2.5)
+		_feed_hint_label.modulate = Color(1, 1, 1, _feed_hint_alpha)
+		if _feed_hint_alpha <= 0.0:
+			_feed_hint_label.visible = false
 
 func _update_brain_panel() -> void:
 	if brain_panel == null or not brain_panel.visible: return

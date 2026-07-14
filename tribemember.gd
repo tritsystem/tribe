@@ -47,6 +47,42 @@ var _player_node: Node3D = null
 @export var interact_range: float = 3.5
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TUNABLES — all trust and rank numbers live here.
+# Change these to re-tune the progression; no other code needs touching.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── relationship meter (0 → RELATIONSHIP_MAX) ──
+const RELATIONSHIP_MAX     := 3.0   # hard ceiling on the bond value
+const FOLLOW_FIRE_REL_GAIN := 0.18  # bond gained each time the Follow neuron fires
+const BOND_DECAY_RATE      := 0.004 # bond lost per second passively (trust must be maintained)
+const FACTION_VOUCH_RATE   := 0.06  # bond nudged upward per second by faction-mate support
+const WORK_REL_GAIN        := 0.2   # bond gained for completing a voluntary (unpaid) task
+const STARVE_DECAY_RATE    := 0.06  # bond eroded per second while the tribe is starving
+const DEFECT_THRESHOLD     := 0.7   # starving backers leave when bond drops below this
+const TRUST_BAR_SCALE      := 2.20  # relationship value that fills the trust bar to 100% (equals Devoted threshold)
+
+# ── rank thresholds (relationship value needed to reach each rank) ──
+const RANKS := [
+	["Stranger",     0.00],
+	["Acquaintance", 0.30],
+	["Friend",       0.70],
+	["Loyal",        1.30],
+	["Devoted",      2.20],   # must equal TRUST_BAR_SCALE
+]
+
+# ── loyalty score each rank contributes toward accepting a risky order ──
+const RANK_LOYALTY := {
+	"Stranger": 15, "Acquaintance": 45, "Friend": 75, "Loyal": 100, "Devoted": 125,
+}
+
+# ── order acceptance: drive = ORDER_BASE + rank_loyalty + courage; must beat ORDER_RISK ──
+const ORDER_BASE := 70                                                        # flat base score
+const ORDER_RISK := {"gather": 100, "hunt": 130, "scout": 165, "wood": 100}  # threshold per task type
+
+# ── tribe food spent to recruit a neutral wanderer ──
+const RECRUIT_FOOD_COST := 3
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PERSONALITIES — each is a different BRAIN + different traits. This is where the
 # Spikeling tech earns its keep: a "Trusting" member literally has stronger
 # trust synapses and a slower-leaking Trust neuron than a "Wary" one.
@@ -79,14 +115,6 @@ func _brain_text() -> String:
 	t += "refractory=2\n"
 	return t
 
-# ── Trust ranks — deeper bonds take progressively longer to earn. ──
-const RANKS := [
-	["Stranger", 0.00],
-	["Acquaintance", 0.30],
-	["Friend", 0.70],
-	["Loyal", 1.30],
-	["Devoted", 2.20],
-]
 var current_rank: String = "Stranger"
 
 # ── thought system ──
@@ -114,11 +142,13 @@ var _wander_pause: float = 0.0
 var _leaving: bool = false               # starved out — wandering off
 
 # ── orders / tasks ──
-const RANK_LOYALTY := {
-	"Stranger": 15, "Acquaintance": 45, "Friend": 75, "Loyal": 100, "Devoted": 125,
+const RANK_COLORS := {
+	"Stranger":     Color(0.60, 0.60, 0.60),
+	"Acquaintance": Color(0.85, 0.85, 0.40),
+	"Friend":       Color(0.35, 0.90, 0.40),
+	"Loyal":        Color(0.40, 0.65, 1.00),
+	"Devoted":      Color(1.00, 0.80, 0.20),
 }
-const ORDER_RISK := {"gather": 100, "hunt": 130, "scout": 165, "wood": 100}
-const ORDER_BASE := 70
 var is_busy: bool = false
 var _task_kind: String = ""
 var _work_time: float = 0.0
@@ -480,13 +510,13 @@ func _physics_process(delta: float) -> void:
 		SpatialGrid.update(self)
 
 	# decay the bond slowly so trust must be maintained, not just spiked once
-	relationship = maxf(0.0, relationship - delta * 0.004)
+	relationship = maxf(0.0, relationship - delta * BOND_DECAY_RATE)
 	# my faction vouches for you: if my compatible friends back you, I warm too
 	if faction_vouch > 0.0 and not is_backing_you:
-		relationship = minf(3.0, relationship + delta * faction_vouch * 0.06)
+		relationship = minf(RELATIONSHIP_MAX, relationship + delta * faction_vouch * FACTION_VOUCH_RATE)
 	_update_rank()
 	_update_faction_mark()
-	trust_display = lerpf(trust_display, clampf(relationship / 2.2, 0.0, 1.0), delta * 4.0)
+	trust_display = lerpf(trust_display, clampf(relationship / TRUST_BAR_SCALE, 0.0, 1.0), delta * 4.0)
 
 	# thoughts
 	_thought_timer -= delta
@@ -800,7 +830,7 @@ func _brain_tick() -> void:
 	var fired: Array = brain.step()
 	if "Follow" in fired:
 		follow_fires += 1
-		relationship = minf(3.0, relationship + 0.18)
+		relationship = minf(RELATIONSHIP_MAX, relationship + FOLLOW_FIRE_REL_GAIN)
 		_update_rank()
 		if follow_fires >= follow_threshold_hits and not is_backing_you:
 			is_backing_you = true
@@ -819,6 +849,15 @@ func _update_rank() -> void:
 		if rose:
 			if anim: anim.pop(0.9)   # a bigger bounce as the bond deepens
 			_think(_rank_thought(current_rank))
+
+# UI hint: how much more relationship trust is needed to reach the next rank.
+func relationship_to_next_rank() -> float:
+	for i in range(RANKS.size()):
+		if String(RANKS[i][0]) == current_rank:
+			if i + 1 >= RANKS.size():
+				return 0.0
+			return maxf(0.0, float(RANKS[i + 1][1]) - relationship)
+	return 0.0
 
 # ── thoughts ──
 func _think(text: String, hold: float = 2.5) -> void:
@@ -1039,8 +1078,6 @@ func _nearest_neutral() -> Node3D:
 				best = nn
 	return best
 
-const RECRUIT_FOOD_COST := 3
-
 # spend tribe food to win over the wanderer we walked up to. If the food
 # disappeared between accepting the order and arriving (someone else spent
 # it), fall back to gathering more instead of recruiting empty-handed.
@@ -1197,7 +1234,7 @@ func _complete_task() -> void:
 	_task_wood = 0
 	# loyalty only grows from work done WILLINGLY — paid mercenaries earn nothing
 	if not _task_paid and (_task_food > 0 or _task_mats > 0 or _task_wood > 0 or k == "scout"):
-		relationship = minf(3.0, relationship + 0.2)
+		relationship = minf(RELATIONSHIP_MAX, relationship + WORK_REL_GAIN)
 		_update_rank()
 	_task_paid = false
 
@@ -1225,9 +1262,9 @@ func get_might() -> int:
 
 # ── starvation: called every frame by the manager while the tribe has no food ──
 func starve(delta: float) -> void:
-	relationship = maxf(0.0, relationship - delta * 0.06)
+	relationship = maxf(0.0, relationship - delta * STARVE_DECAY_RATE)
 	_update_rank()
-	if is_backing_you and relationship < 0.7:
+	if is_backing_you and relationship < DEFECT_THRESHOLD:
 		is_backing_you = false
 		_leaving = true
 		var away := Vector3(randf() - 0.5, 0.0, randf() - 0.5)
@@ -1578,8 +1615,10 @@ func _update_label() -> void:
 		hint = "\n[1]gather [2]hunt [3]scout"
 	if hunger > 70.0:
 		hint += "  (hungry)"
-	trust_label.text = "%s  [%s · %s]\nTrust: %d%%%s%s" % [member_name, current_rank, personality, pct, status, hint]
-	trust_label.modulate = trust_label.modulate.lerp(Color.WHITE, 0.05)
+	var next_needed := relationship_to_next_rank()
+	var next_hint := (" (+%.1f to next)" % next_needed) if next_needed > 0.0 else ""
+	trust_label.text = "%s  [%s · %s]\nTrust: %d%%%s%s%s" % [member_name, current_rank, personality, pct, next_hint, status, hint]
+	trust_label.modulate = trust_label.modulate.lerp(RANK_COLORS.get(current_rank, Color.WHITE), 0.05)
 
 func _update_thought_label() -> void:
 	if not thought_label:
