@@ -62,10 +62,10 @@ var clubs: int      = 0   # the SHARED tribe armory — tribemembers reserve/rel
 						  # from this for their own hunts (see reserve_club below)
 var _clubs_out: int = 0
 var player_holds_club: bool = false   # the player's OWN club — separate from the
-                                       # shared armory so a tribemember grabbing a
+									   # shared armory so a tribemember grabbing a
 									   # club for a hunt can't make the player's
-                                       # own crafted club seem to vanish out from
-                                       # under them ("my club constantly disappears")
+									   # own crafted club seem to vanish out from
+									   # under them ("my club constantly disappears")
 var wood: int       = 0
 var unrest: float   = 0.0
 var challenged: bool = false
@@ -582,7 +582,7 @@ func _spawn_one_member(nm: String, pers: String, pos: Vector3) -> Node:
 	return m
 
 func _next_member_name() -> String:
-	var name := MEMBER_NAMES[_name_cursor % MEMBER_NAMES.size()]
+	var name: String = MEMBER_NAMES[_name_cursor % MEMBER_NAMES.size()]
 	_name_cursor += 1
 	return name
 
