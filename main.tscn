@@ -70,6 +70,9 @@ light_energy = 1.4
 shadow_enabled = true
 directional_shadow_mode = 2
 directional_shadow_blend_splits = true
+directional_shadow_max_distance = 60.0
+shadow_bias = 0.05
+shadow_normal_bias = 2.0
 shadow_blur = 0.1
 
 [node name="Floor" type="StaticBody3D" parent="." unique_id=1639273813]

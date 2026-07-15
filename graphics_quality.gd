@@ -5,7 +5,10 @@ extends Node
 
 enum Quality { LOW, MEDIUM, HIGH }
 
-var current: int = Quality.HIGH
+# Default MEDIUM, not HIGH: HIGH (MSAA 4x + SSAO + 4-split shadows) tanked
+# framerate. MEDIUM keeps shadows/glow/fog/tonemap (the look) but drops the
+# three biggest GPU costs. Bump to HIGH from the settings menu if the GPU allows.
+var current: int = Quality.MEDIUM
 
 func _ready() -> void:
 	set_process(true)   # apply on first frame after main scene is loaded

@@ -1028,16 +1028,23 @@ const DEPOSIT_RANGE := 3.0   # how close to the stockpile counts as "back" — g
                               # perpetually jostle for position via separation forces
 
 func _begin_return() -> void:
-	state = St.RETURN
-	# walk back to the STOCKPILE specifically to deposit — not our own
-	# individual home_pos (where we originally spawned, which could be
-	# scattered anywhere near camp). With many members all converging on
-	# the same tiny home_pos at a tight 0.5-unit arrival radius, separation
-	# forces pushing them apart meant they could circle the pile forever
-	# without ever all satisfying that check at once — looked exactly like
-	# getting stuck on the stockpile.
-	var sp := get_tree().get_first_node_in_group("stockpile")
-	_target = (sp as Node3D).global_position if sp else home_pos
+	if _task_kind == "raid":
+		# Raid members walk home so they aren't left stranded at the enemy camp.
+		state = St.RETURN
+		var sp := get_tree().get_first_node_in_group("stockpile")
+		_target = (sp as Node3D).global_position if sp else home_pos
+		return
+	# For all other tasks: deposit loot in place and wander nearby.
+	# Members should stay near where they worked, not sprint back to the player.
+	state = St.WANDER
+	if is_busy:
+		_complete_task()
+	# If _complete_task() triggered a new order (e.g. recruit-after-gather),
+	# don't clobber its destination.
+	if not is_busy:
+		var ang := randf() * TAU
+		_target = global_position + Vector3(cos(ang), 0.0, sin(ang)) * randf_range(2.0, 4.0)
+		_target.y = global_position.y
 
 func _do_gather() -> void:
 	if _target_node and _target_node.has_method("harvest"):
@@ -1509,15 +1516,11 @@ func _idle_move(delta: float) -> void:
 	if not _leaving and _player_node != null:
 		var dp := global_position.distance_to(_player_node.global_position)
 		var fkind: String = manager.formation_kind if (manager and "formation_kind" in manager) else "loose"
-		# formation positioning itself only needs SOME trust (relationship >
-		# 0, matching the rest of the formation fixes) — it used to require
-		# is_backing_you here too, so even though _auto_work correctly
-		# stopped a partial-trust member from picking a new chore, they'd
-		# just fall through to plain _wander() instead of actually moving
-		# into their formation slot. is_backing_you still gates the
-		# unrelated "trail me everywhere"/"approach when I'm close" behavior.
+		# Members move toward the player only when a formation pulls them in.
+		# Removing the old distance-based trailing so members stay near where
+		# they worked instead of running back to the player after every task.
 		var formation_active: bool = fkind != "loose" and relationship > 0.0 and dp <= FORMATION_RALLY_RANGE
-		if (is_backing_you and (dp > 6.0 or (player_in_range and fkind != "loose"))) or formation_active:
+		if formation_active:
 			var target_pos := _stand_near(_player_node.global_position)
 			if fkind != "loose" and manager and manager.has_method("formation_offset"):
 				_formation_cd -= delta
