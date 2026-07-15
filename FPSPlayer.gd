@@ -15,10 +15,12 @@ class_name FPSPlayer
 @export var speed: float = 5.0
 @export var jump_velocity: float = 4.5
 @export var mouse_sensitivity: float = 0.003
+@export var look_smoothing: float = 7.0   # lerp speed toward target angle; higher = snappier, lower = floatier
 
 var gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity", 9.8)
 
 @onready var camera: Camera3D = $Camera3D
+@onready var _fps_label: Label = $"../UI/FPSLabel"
 
 # survival
 var manager
@@ -36,17 +38,25 @@ const REACH := 3.0           # how close to pick berries
 const CLUB_REACH := 2.8      # how close to club a deer
 const THROW_RANGE := 20.0    # how far a thrown club can reach
 const THROW_DAMAGE := 22.0
+var _target_yaw: float = 0.0
+var _target_pitch: float = 0.0
 var _carve_cd: float = 0.0
 var _keys_down: Dictionary = {}
 var _club_model: MeshInstance3D = null
 var _throw_anim_active: bool = false   # suppresses the per-frame visibility sync during the windup tween
 var _v_tap_count: int = 0   # discrete [V] presses within the window — 3 selects the whole tribe
 var _v_tap_window: float = 0.0
+var _shake_amt: float = 0.0      # current shake magnitude (world units); decays to 0
+var _cam_base_pos: Vector3 = Vector3.ZERO
 
 func _ready() -> void:
 	add_to_group("player")
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_target_yaw = rotation.y
+	_target_pitch = 0.0
 	_build_club_model()
+	if camera:
+		_cam_base_pos = camera.position
 
 func _build_club_model() -> void:
 	# a club held in view, shown only while the tribe actually has one to wield
@@ -65,22 +75,40 @@ func _build_club_model() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		rotate_y(-event.relative.x * mouse_sensitivity)
-		camera.rotate_x(-event.relative.y * mouse_sensitivity)
-		camera.rotation.x = clampf(camera.rotation.x, -1.4, 1.4)
+		_target_yaw -= event.relative.x * mouse_sensitivity
+		_target_pitch = clampf(_target_pitch - event.relative.y * mouse_sensitivity, -1.4, 1.4)
 	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
 		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		else:
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	if event is InputEventKey and event.pressed and event.keycode == KEY_F3:
+		if _fps_label:
+			_fps_label.visible = not _fps_label.visible
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		_swing_club()
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
 		_throw_club()
 
+func _process(_delta: float) -> void:
+	if _fps_label and _fps_label.visible:
+		_fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
+
 func _physics_process(delta: float) -> void:
 	if manager == null:
 		manager = get_tree().get_first_node_in_group("tribe_manager")
+
+	var t := minf(look_smoothing * delta, 1.0)
+	rotation.y = lerp_angle(rotation.y, _target_yaw, t)
+	if camera:
+		camera.rotation.x = lerpf(camera.rotation.x, _target_pitch, t)
+		if _shake_amt > 0.001:
+			camera.position = _cam_base_pos + Vector3(
+				randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), 0.0) * _shake_amt
+			_shake_amt = move_toward(_shake_amt, 0.0, delta * 0.25)
+		else:
+			_shake_amt = 0.0
+			camera.position = _cam_base_pos
 
 	_survival(delta)
 
@@ -117,6 +145,12 @@ func take_hit(dmg: float, _attacker) -> void:
 		velocity = Vector3.ZERO
 		if manager and manager.has_method("notify"):
 			manager.notify("You were driven off and limped back to camp!")
+
+# Trigger a short camera shake. strength is in world-space metres of peak offset
+# (0.04 is a modest thud; 0.08 would be a heavy blow). Multiple callers in one
+# frame take the strongest — the effect decays at 0.25 units/s.
+func screen_shake(strength: float = 0.04) -> void:
+	_shake_amt = maxf(_shake_amt, strength)
 
 func _survival(delta: float) -> void:
 	hp = minf(max_hp, hp + delta * 3.0)   # slowly recover

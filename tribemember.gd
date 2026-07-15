@@ -79,6 +79,9 @@ const RANK_LOYALTY := {
 const ORDER_BASE := 70                                                        # flat base score
 const ORDER_RISK := {"gather": 100, "hunt": 130, "scout": 165, "wood": 100}  # threshold per task type
 
+# ── brain LOD: skip Spikeling ticks for members beyond this distance ──
+const BRAIN_LOD_RADIUS := 80.0
+
 # ── tribe food spent to recruit a neutral wanderer ──
 const RECRUIT_FOOD_COST := 3
 
@@ -494,12 +497,19 @@ func _exit_tree() -> void:
 	SpatialGrid.remove(self)
 
 func _physics_process(delta: float) -> void:
-	# step the brain at a fixed rate (cheap)
-	_tick_accum += delta
-	var interval := 1.0 / TICK_HZ
-	while _tick_accum >= interval:
-		_tick_accum -= interval
-		_brain_tick()
+	# LOD: skip Spikeling ticks for members the player can't see. Drain the
+	# accumulator so there's no burst of catch-up ticks when re-entering range.
+	var _far_from_player: bool = _player_node != null \
+		and global_position.distance_to(_player_node.global_position) > BRAIN_LOD_RADIUS
+	if _far_from_player:
+		_tick_accum = 0.0
+	else:
+		# step the brain at a fixed rate (cheap)
+		_tick_accum += delta
+		var interval := 1.0 / TICK_HZ
+		while _tick_accum >= interval:
+			_tick_accum -= interval
+			_brain_tick()
 
 	# register in the world spatial grid so rival npc.gd's "tribe" group
 	# queries (intruder/outnumber/war-target checks) can find us without

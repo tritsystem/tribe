@@ -56,11 +56,15 @@ func _on_body_entered(body: Node) -> void:
 	var mgr = thrower.manager if (thrower and "manager" in thrower) else null
 	if body.is_in_group("npc") and not body.get("neutral") and body.has_method("take_hit"):
 		body.take_hit(damage, thrower)
+		if thrower and thrower.has_method("screen_shake"):
+			thrower.screen_shake(0.035)
 		if mgr and mgr.has_method("notify"):
 			mgr.notify("Your thrown club strikes true!")
 		queue_free()
 	elif body.is_in_group("animal") and body.has_method("killed"):
 		var loot: Dictionary = body.killed()
+		if thrower and thrower.has_method("screen_shake"):
+			thrower.screen_shake(0.04)
 		if mgr:
 			mgr.add_food(int(loot.get("food", 0)))
 			mgr.add_materials(int(loot.get("skins", 0)))

@@ -126,6 +126,7 @@ const LOD_NEAR_DIST := 50.0
 const LOD_MID_DIST := 150.0
 const LOD_CHECK_INTERVAL := 0.5
 var _lod_accum: float = 0.0
+var _lod_tier: int = 0   # cached tier from last _tick_lod; 2 = far (brain skipped)
 
 # ── LEADER PERSONALITY — each tribe's leader has traits that bias the whole
 # tribe's behavior (raid frequency/target choice, recruiting eagerness).
@@ -748,6 +749,11 @@ func _process(delta: float) -> void:
 func _tick_hive_brain(delta: float) -> void:
 	if brain == null:
 		return
+	# Skip neural work entirely for tribes the player can't see or interact with.
+	# Drain the accumulator so there's no burst of catch-up ticks on LOD re-entry.
+	if _lod_tier == 2:
+		_brain_tick_accum = 0.0
+		return
 	_brain_tick_accum += delta
 	var interval := 1.0 / BRAIN_TICK_HZ
 	while _brain_tick_accum >= interval:
@@ -808,6 +814,7 @@ func _tick_lod(delta: float) -> void:
 	# Node3D.visible=false already removes children from the draw list,
 	# no need to touch each mesh individually.
 	visible = (tier != 2)
+	_lod_tier = tier
 
 	if not _spawned:
 		return

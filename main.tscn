@@ -9,7 +9,31 @@ background_mode = 1
 background_color = Color(0.4, 0.6, 0.75, 1)
 ambient_light_source = 2
 ambient_light_color = Color(0.6, 0.65, 0.7, 1)
-ambient_light_energy = 0.6
+ambient_light_energy = 0.7
+tonemap_mode = 2
+tonemap_exposure = 1.0
+tonemap_white = 1.0
+fog_enabled = true
+fog_light_color = Color(0.55, 0.65, 0.8, 1)
+fog_light_energy = 1.0
+fog_sun_scatter = 0.2
+fog_density = 0.02
+fog_aerial_perspective = 0.35
+fog_sky_affect = 0.5
+glow_enabled = true
+glow_normalized = false
+glow_intensity = 0.7
+glow_bloom = 0.1
+glow_blend_mode = 4
+glow_hdr_threshold = 1.0
+glow_hdr_scale = 2.0
+ssao_enabled = true
+ssao_radius = 1.0
+ssao_intensity = 1.5
+ssao_power = 1.5
+ssao_detail = 0.5
+ssao_horizon = 0.06
+ssao_sharpness = 0.98
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_floor"]
 size = Vector2(360, 360)
@@ -41,7 +65,12 @@ environment = SubResource("Env")
 
 [node name="Sun" type="DirectionalLight3D" parent="." unique_id=436880449]
 transform = Transform3D(0.7, -0.5, 0.5, 0, 0.7, 0.7, -0.7, -0.5, 0.5, 0, 8, 0)
+light_color = Color(1, 0.94, 0.82, 1)
+light_energy = 1.4
 shadow_enabled = true
+directional_shadow_mode = 2
+directional_shadow_blend_splits = true
+shadow_blur = 0.1
 
 [node name="Floor" type="StaticBody3D" parent="." unique_id=1639273813]
 
@@ -111,3 +140,15 @@ theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 6
 theme_override_font_sizes/font_size = 20
 text = "TRIBE: earn trust to lead  |  0/0 members backing you (need 3)"
+
+[node name="FPSLabel" type="Label" parent="UI" unique_id=547389201]
+offset_left = 16.0
+offset_top = 96.0
+offset_right = 180.0
+offset_bottom = 116.0
+visible = false
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 5
+theme_override_font_sizes/font_size = 15
+text = "FPS: --"
