@@ -14,6 +14,7 @@ var fall_accel: float = 7.0   # named to avoid colliding with Area3D's own nativ
 
 func _ready() -> void:
 	monitoring = true
+	add_to_group("thrown_club")   # so nearby animals sense it and flinch/flee
 	body_entered.connect(_on_body_entered)
 
 	var mesh := MeshInstance3D.new()

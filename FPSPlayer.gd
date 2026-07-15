@@ -48,6 +48,8 @@ var _v_tap_count: int = 0   # discrete [V] presses within the window — 3 selec
 var _v_tap_window: float = 0.0
 var _shake_amt: float = 0.0      # current shake magnitude (world units); decays to 0
 var _cam_base_pos: Vector3 = Vector3.ZERO
+var _hurt_flash: float = 0.0            # 1.0 on hit, fades -> red damage vignette
+var _hurt_overlay: ColorRect = null
 
 func _ready() -> void:
 	add_to_group("player")
@@ -55,8 +57,23 @@ func _ready() -> void:
 	_target_yaw = rotation.y
 	_target_pitch = 0.0
 	_build_club_model()
+	_build_hurt_overlay()
 	if camera:
 		_cam_base_pos = camera.position
+
+# A full-screen red vignette that flashes when you take a hit -- the SEEN half
+# of combat feedback (screen_shake is the FELT half). Without this, rival
+# attacks were invisible and read as "npcs ignore me".
+func _build_hurt_overlay() -> void:
+	var ui := get_node_or_null("../UI")
+	if ui == null:
+		return
+	_hurt_overlay = ColorRect.new()
+	_hurt_overlay.name = "HurtFlash"
+	_hurt_overlay.color = Color(0.75, 0.05, 0.05, 0.0)
+	_hurt_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hurt_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	ui.add_child(_hurt_overlay)
 
 func _build_club_model() -> void:
 	# a club held in view, shown only while the tribe actually has one to wield
@@ -90,9 +107,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
 		_throw_club()
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if _fps_label and _fps_label.visible:
 		_fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
+	if _hurt_flash > 0.0:
+		_hurt_flash = maxf(0.0, _hurt_flash - delta * 2.2)   # ~0.45s fade
+		if _hurt_overlay:
+			_hurt_overlay.color.a = _hurt_flash * 0.42
 
 func _physics_process(delta: float) -> void:
 	if manager == null:
@@ -139,6 +160,12 @@ func _physics_process(delta: float) -> void:
 # ── hunger + survival inputs ──
 func take_hit(dmg: float, _attacker) -> void:
 	hp -= dmg
+	# FEEDBACK -- this used to be completely silent: no flash, no shake, no sound.
+	# Rivals WERE chasing and clubbing the player the whole time, but with hp only
+	# shown as a small number in a label (and 3hp/s regen quietly topping it back
+	# up), an attack was literally imperceptible and read as "npcs ignore me".
+	_hurt_flash = 1.0
+	screen_shake(0.05 + minf(dmg, 20.0) * 0.004)   # harder hits shake harder
 	if hp <= 0.0:
 		hp = max_hp
 		global_position = Vector3(0, 1, 5)   # beaten back to your own camp

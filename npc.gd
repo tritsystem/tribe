@@ -26,6 +26,14 @@ var color: Color = Color(0.7, 0.7, 0.7)
 @export var speed: float = 1.8
 @export var flee_speed: float = 3.2
 @export var hunt_speed: float = 3.7   # faster than any animal (rabbit flees 3.3)
+# The PLAYER runs at 5.0 -- hunt_speed was tuned to catch ANIMALS, so a rival
+# literally could never catch him and you could jog through any camp untouched.
+# Chasing the player uses this instead. The margin matters: at 5.8 they close
+# 0.8 m/s, so from ~6m (walking into a camp) they reach melee (1.7m) in ~5s --
+# inside the 7s CHASE_GIVEUP_TIME, so camps are genuinely dangerous. But spotted
+# from ~15m they'd need ~17s to close, so they give up first and you escape.
+# Close = caught, far = you get away. Tune this number to taste.
+@export var chase_speed: float = 5.8
 
 const BRAIN := """# Spikeling Neural Configuration
 neuron SeeDanger threshold=50 leak=25
@@ -384,6 +392,7 @@ func take_hit(dmg: float, attacker) -> void:
 		_foe = null
 	else:
 		_foe = attacker as Node3D
+		_rally_defenders(_foe)   # attacked -> call the base to help drive them off
 
 # how many likely-hostile units (rival npcs, player-tribe members, the
 # player) are near us right now — used to decide fight vs flee when hit
@@ -481,6 +490,7 @@ func _move(delta: float) -> void:
 				if new_foe != null:
 					_foe = new_foe
 					_chase_timer = CHASE_GIVEUP_TIME
+					_rally_defenders(_foe)   # spotted an intruder -> alert the base
 		if _foe != null and is_instance_valid(_foe):
 			_flee_timer = 0.0
 			var fp := (_foe as Node3D).global_position
@@ -503,7 +513,10 @@ func _move(delta: float) -> void:
 					var to := fp - global_position
 					to.y = 0.0
 					if to.length() > 0.01:
-						_drive(to.normalized(), hunt_speed)
+						# only the player needs the faster pace -- rival-vs-rival
+						# chases keep their original balance
+						var pace: float = chase_speed if _foe.is_in_group("player") else hunt_speed
+						_drive(to.normalized(), pace)
 			else:
 				_foe = null
 			if _foe != null:
@@ -530,6 +543,23 @@ func _move(delta: float) -> void:
 	_apply_separation()
 	move_and_slide()
 
+# Alert nearby same-tribe members to converge on our foe, so attacking one
+# defender (or spotting an intruder) brings the whole base to its defense
+# instead of members reacting one at a time. Only recruits members who aren't
+# already fighting someone.
+func _rally_defenders(foe: Node3D) -> void:
+	if foe == null or not is_instance_valid(foe):
+		return
+	for o in SpatialGrid.query(global_position, 14.0, "npc"):
+		var on := o as Node3D
+		if on == self or on == null or not is_instance_valid(on):
+			continue
+		if on.get("neutral") or on.get("tribe") != tribe:
+			continue
+		if on.get("_foe") == null:
+			on.set("_foe", foe)
+			on.set("_chase_timer", CHASE_GIVEUP_TIME)
+
 # find the nearest intruder (rival NPC or the player) inside our territory
 func _find_intruder() -> Node3D:
 	if tribe == null or not is_instance_valid(tribe):
@@ -537,9 +567,25 @@ func _find_intruder() -> Node3D:
 	var best: Node3D = null
 	var bd := 18.0
 	var p := get_tree().get_first_node_in_group("player") as Node3D
-	if p and is_instance_valid(p) and home.distance_to(p.global_position) < territory:
+	if p and is_instance_valid(p):
 		var dp := global_position.distance_to(p.global_position)
-		if dp < bd:
+		# The player used to only count as an intruder inside our CAMP radius
+		# (home +/- territory), so any rival out foraging ignored him completely,
+		# and even a tribe that hated him never attacked unless he walked into
+		# camp. Three ways he's a target now:
+		#   1. inside our territory  -- classic camp defense
+		#   2. right on top of us    -- territorial reaction to personal space
+		#   3. our tribe is hostile to him / raiding him -- hunt him on sight
+		var opinion: float = 0.0
+		if tribe != null and is_instance_valid(tribe):
+			var po = tribe.get("player_opinion")
+			if po != null:
+				opinion = float(po)
+		var friendly: bool = opinion >= 0.3          # they like him -- don't jump him
+		var in_territory: bool = home.distance_to(p.global_position) < territory
+		var too_close: bool = dp < 6.0 and not friendly
+		var hostile_to_player: bool = _raid_player or opinion <= -0.3
+		if (in_territory or too_close or hostile_to_player) and dp < bd:
 			bd = dp
 			best = p
 	for o in SpatialGrid.query(global_position, bd, "npc"):

@@ -142,6 +142,7 @@ var gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity", 9
 var home_pos: Vector3 = Vector3.ZERO
 var _target: Vector3 = Vector3.ZERO
 var _wander_pause: float = 0.0
+var _fidget_cd: float = 0.0              # time until next idle fidget
 var _leaving: bool = false               # starved out — wandering off
 
 # ── orders / tasks ──
@@ -251,6 +252,7 @@ func _ready() -> void:
 		push_error("TribeMember: brain failed to load")
 	home_pos = global_position
 	_target = home_pos
+	_fidget_cd = randf_range(4.0, 14.0)   # stagger so members don't all fidget simultaneously
 	_apply_tint()
 	# faction-mark floating orbs were removed — too many same-ish colored dots
 	# bobbing over members' heads read as visual noise rather than useful
@@ -399,8 +401,10 @@ func _nearest_base_threat() -> Node3D:
 		var n := o as Node3D
 		if n == null or not is_instance_valid(n) or n.get("neutral"):
 			continue
-		if not n.get("_raid_player") and not n.get("at_war"):
-			continue
+		# ANY non-neutral rival this close to our stockpile is a threat to defend
+		# against -- not only ones already flagged as raiding/at-war. Members were
+		# ignoring hostiles standing right in camp because they weren't flagged.
+		# (Own members are in group "tribe", not "npc", so no friendly fire.)
 		if center.distance_to(n.global_position) > BASE_DEFENSE_RADIUS:
 			continue
 		var d := global_position.distance_to(n.global_position)
@@ -558,19 +562,42 @@ func _check_stuck(delta: float) -> void:
 		_break_free()
 
 func _break_free() -> void:
-	# trapped on a fence or a built block wall? bash through it — teepees are
-	# walk-through (see teepee.gd), not a movement obstacle in the first place
-	for grp in ["fence", "block"]:
+	# trapped on a fence, a built block wall, or a TREE. Bash destructibles
+	# (fence/block) — teepees are walk-through (see teepee.gd). Trees can't be
+	# bashed, so the only way past is to route AROUND them, which the random
+	# sideways shove failed at (it often just re-charged the same trunk).
+	var obstacle: Node3D = null
+	var od := 2.2
+	for grp in ["fence", "block", "tree"]:
 		for f in get_tree().get_nodes_in_group(grp):
 			var fn := f as Node3D
-			if fn and is_instance_valid(fn) and global_position.distance_to(fn.global_position) < 1.9 and fn.has_method("take_damage"):
+			if fn == null or not is_instance_valid(fn):
+				continue
+			var d := global_position.distance_to(fn.global_position)
+			if grp != "tree" and d < 1.9 and fn.has_method("take_damage"):
 				fn.take_damage(3)
-	# shove sideways to dislodge and rethink the route
-	var a := randf() * TAU
-	velocity.x += cos(a) * move_speed * 2.0
-	velocity.z += sin(a) * move_speed * 2.0
+			if d < od:
+				od = d
+				obstacle = fn
+	# push directly AWAY from the nearest obstacle (reliable) plus a
+	# perpendicular slide, so we round it instead of grinding into it again.
+	var away := Vector3(randf() - 0.5, 0.0, randf() - 0.5)
+	if obstacle != null:
+		away = global_position - obstacle.global_position
+		away.y = 0.0
+	if away.length() < 0.01:
+		away = Vector3(randf() - 0.5, 0.0, randf() - 0.5)
+	away = away.normalized()
+	var perp := Vector3(-away.z, 0.0, away.x)
+	if randf() < 0.5:
+		perp = -perp
+	velocity.x += (away.x * 1.5 + perp.x) * move_speed
+	velocity.z += (away.z * 1.5 + perp.z) * move_speed
+	# steer the WANDER target away from the obstacle too, so we don't immediately
+	# path back into it (task targets reassert themselves on their own next frame)
 	if state == St.WANDER:
-		_target = _anchor()
+		_target = global_position + (away + perp * 0.5).normalized() * randf_range(3.0, 6.0)
+		_target.y = global_position.y
 
 # ── tribe members help run the economy themselves: hunt, farm, scout, carve
 # clubs. Used to require is_backing_you (the FULL trust threshold) just to
@@ -1551,6 +1578,7 @@ func _wander(delta: float) -> void:
 	if _wander_pause > 0.0:
 		_wander_pause -= delta
 		_halt()
+		_idle_fidget(delta)
 		return
 	var center := _anchor()
 	var flat := global_position - center
@@ -1568,6 +1596,43 @@ func _wander(delta: float) -> void:
 		return
 	_steer_to(_target, delta)
 	_face(_target, delta)
+
+func _idle_fidget(delta: float) -> void:
+	_fidget_cd -= delta
+	if _fidget_cd > 0.0:
+		return
+	_fidget_cd = randf_range(8.0, 20.0)
+	# pick something nearby to glance at: player first, then nearest member
+	var glance_target: Node3D = null
+	if _player_node != null and global_position.distance_to(_player_node.global_position) < 18.0:
+		glance_target = _player_node
+	else:
+		var best_d: float = 12.0
+		for o in get_tree().get_nodes_in_group("tribe"):
+			if o == self or not is_instance_valid(o):
+				continue
+			var n := o as Node3D
+			var d := global_position.distance_to(n.global_position)
+			if d < best_d:
+				best_d = d
+				glance_target = n
+	var face := get_node_or_null("Face")
+	if face != null and glance_target != null and randf() < 0.65:
+		var to := glance_target.global_position - global_position
+		to.y = 0.0
+		if to.length() > 0.1:
+			var yaw_world := atan2(to.x, to.z)
+			var yaw_local := wrapf(yaw_world - rotation.y, -PI, PI)
+			yaw_local = clampf(yaw_local, -PI * 0.5, PI * 0.5)
+			var base_yaw: float = face.rotation.y
+			var tw := create_tween()
+			tw.tween_property(face, "rotation:y", yaw_local, 0.25)
+			tw.tween_interval(0.7)
+			tw.tween_property(face, "rotation:y", base_yaw, 0.3)
+			return
+	# weight-shift fallback: a tiny body pop
+	if anim:
+		anim.pop(0.18)
 
 func _arrived(p: Vector3) -> bool:
 	var d := global_position - p

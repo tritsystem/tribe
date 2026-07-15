@@ -37,6 +37,7 @@ var _wander_pause: float = 0.0
 var _threat: Node3D = null
 var _flee_timer: float = 0.0
 var _graze_timer: float = 0.0
+var _look_cd: float = 0.0         # time until next idle "scan around" head/body turn
 var _tick_accum: float = 0.0
 const TICK_HZ := 10.0
 const ARRIVE := 0.6
@@ -162,10 +163,32 @@ func _check_stuck(delta: float) -> void:
 	var moved := global_position.distance_to(_last_pos)
 	_last_pos = global_position
 	if Vector2(velocity.x, velocity.z).length() > 0.3 and moved < 0.12:
-		var a := randf() * TAU
-		velocity.x += cos(a) * wander_speed * 2.0
-		velocity.z += sin(a) * wander_speed * 2.0
-		_wander_target = home_pos + Vector3(cos(a), 0, sin(a)) * randf_range(2.0, 6.0)
+		# find the nearest obstacle (incl. trees animals can't bash) and push
+		# directly away from it, heading somewhere clear -- not a random shove
+		# that often re-charges the same trunk/fence.
+		var obstacle: Node3D = null
+		var od := 2.4
+		for grp in ["tree", "block", "fence"]:
+			for f in get_tree().get_nodes_in_group(grp):
+				var fn := f as Node3D
+				if fn and is_instance_valid(fn):
+					var d := global_position.distance_to(fn.global_position)
+					if d < od:
+						od = d
+						obstacle = fn
+		var away := Vector3(randf() - 0.5, 0.0, randf() - 0.5)
+		if obstacle != null:
+			away = global_position - obstacle.global_position
+			away.y = 0.0
+		if away.length() < 0.01:
+			away = Vector3(randf() - 0.5, 0.0, randf() - 0.5)
+		away = away.normalized()
+		var perp := Vector3(-away.z, 0.0, away.x)
+		if randf() < 0.5:
+			perp = -perp
+		velocity.x += (away.x * 1.5 + perp.x) * wander_speed
+		velocity.z += (away.z * 1.5 + perp.z) * wander_speed
+		_wander_target = global_position + (away + perp * 0.5).normalized() * randf_range(3.0, 6.0)
 		_wander_target.y = home_pos.y
 
 # walk-bob + breathing, with a nervous tremble that rises straight from the
@@ -197,7 +220,7 @@ func _brain_tick() -> void:
 func _nearest_threat() -> Node3D:
 	var best: Node3D = null
 	var bd := sense_radius
-	for grp in ["player", "tribe", "npc"]:
+	for grp in ["player", "tribe", "npc", "thrown_club"]:
 		for t in get_tree().get_nodes_in_group(grp):
 			var n := t as Node3D
 			if n and is_instance_valid(n):
@@ -246,6 +269,7 @@ func _wander(delta: float) -> void:
 	if _wander_pause > 0.0:
 		_wander_pause -= delta
 		_halt()
+		_idle_look(delta)
 		return
 	var d := global_position - _wander_target
 	d.y = 0.0
@@ -261,6 +285,22 @@ func _wander(delta: float) -> void:
 	to.y = 0.0
 	if to.length() > 0.001:
 		_drive(to.normalized(), wander_speed, delta)
+
+# Prey vigilance: while paused, an idle animal occasionally turns to scan a
+# new direction with a small alert bob, instead of standing frozen. Reads as a
+# nervous grazing creature keeping watch.
+func _idle_look(delta: float) -> void:
+	if _wander_pause < 0.7:    # not enough pause left for the 0.6s turn to finish before we move again
+		return
+	_look_cd -= delta
+	if _look_cd > 0.0:
+		return
+	_look_cd = randf_range(1.8, 4.5)
+	var target_yaw: float = wrapf(rotation.y + randf_range(-1.2, 1.2), -PI, PI)
+	var tw := create_tween()
+	tw.tween_property(self, "rotation:y", target_yaw, 0.6)
+	if anim:
+		anim.pop(0.12)
 
 func _nearest_bush() -> Node3D:
 	var best: Node3D = null
