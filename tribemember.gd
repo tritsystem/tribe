@@ -35,6 +35,7 @@ var follow_fires: int = 0
 var is_backing_you: bool = false
 var relationship: float = 0.0            # smooth 0..3 bond meter (drives ranks)
 var feed_count: int = 0
+var betrayed_count: int = 0              # times the PLAYER has struck this member (see betray())
 
 var _tick_accum: float = 0.0
 const TICK_HZ := 10.0
@@ -77,7 +78,18 @@ const RANK_LOYALTY := {
 
 # ── order acceptance: drive = ORDER_BASE + rank_loyalty + courage; must beat ORDER_RISK ──
 const ORDER_BASE := 70                                                        # flat base score
-const ORDER_RISK := {"gather": 100, "hunt": 130, "scout": 165, "wood": 100}  # threshold per task type
+# threshold per task type. ANYTHING NOT LISTED HERE IS REFUSED 100% OF THE TIME
+# (give_order does ORDER_RISK.get(kind, 999)) -- a silent, total failure, so a new
+# verb must be added here or it does not exist. "build"/"carve" are deliberately
+# absent: they route through _start_job -> begin_build()/_begin_carve() instead.
+#
+# "come" at 80 is the cheapest ask in the game -- walking over is not dangerous.
+# drive = 70 + rank_loyalty + courage, so at Stranger (loyalty 15) this lands
+# exactly where it should: a Wary stranger (courage -15 -> drive 70) will NOT
+# come when you call, a Greedy one (-5 -> 80) just barely will, and everyone
+# Steady or better does. Being ignored by someone who doesn't trust you yet is
+# the loyalty system doing its job, not the order failing.
+const ORDER_RISK := {"come": 80, "gather": 100, "hunt": 130, "scout": 165, "wood": 100}
 
 # ── brain LOD: skip Spikeling ticks for members beyond this distance ──
 const BRAIN_LOD_RADIUS := 80.0
@@ -109,11 +121,13 @@ func _brain_text() -> String:
 	t += "neuron SawContribute threshold=50 leak=20\n"
 	t += "neuron SawHelpClear  threshold=50 leak=20\n"
 	t += "neuron SawDefend     threshold=50 leak=20\n"
+	t += "neuron SawBetray     threshold=50 leak=20\n"
 	t += "neuron Trust  threshold=100 leak=%d\n" % int(p["trust_leak"])
 	t += "neuron Follow threshold=100 leak=5\n"
 	t += "synapse SawContribute -> Trust weight=%d\n" % int(p["contrib"])
 	t += "synapse SawHelpClear  -> Trust weight=70\n"
 	t += "synapse SawDefend     -> Trust weight=95\n"
+	t += "synapse SawBetray     -> Trust weight=-160\n"
 	t += "synapse Trust -> Follow weight=%d\n" % int(p["follow_w"])
 	t += "refractory=2\n"
 	return t
@@ -123,6 +137,15 @@ var current_rank: String = "Stranger"
 # ── thought system ──
 var current_thought: String = "..."
 var _thought_timer: float = 0.0
+
+# ── speech log: the last few things this member actually SAID, shown above their
+# head when you're close enough to be part of the conversation. Ambient thoughts
+# bypass _think() (they assign current_thought directly), so this log only ever
+# fills with real lines -- which is what makes it readable rather than noise.
+const SPEECH_LOG_MAX := 3
+const SPEECH_LOG_TTL := 22.0     # a line older than this drops out of the log
+const SPEECH_LOG_RADIUS := 9.0   # stand this close and you see the log
+var _speech_log: Array = []      # [{text: String, t: float}]
 var _idle_pick: int = 0
 var _idle_cycle: float = 0.0
 
@@ -169,6 +192,13 @@ const EAT_AT := 58.0
 const EAT_RESTORE := 62.0
 var _has_club: bool = false      # holding a club while out on a hunt
 var _job_cd: float = 3.0         # autonomous-work cooldown
+# seconds a summoned member stands with you before going back to work. Long
+# enough to say the next thing ("...now repeat after me"); short enough that a
+# forgotten summons doesn't idle the whole camp.
+const SUMMON_HOLD := 12.0
+var _summon_hold: float = 0.0
+# where to stand RELATIVE to the leader when summoned -- see _accept_order("come")
+var _come_offset: Vector3 = Vector3.ZERO
 var _scouted_camp = null         # the WorldTribe a scout actually walked up to —
 								  # remembered so the report at home names THIS
 								  # camp, not whatever's nearest once we're back
@@ -222,6 +252,36 @@ var _club_model: MeshInstance3D = null
 var _hp_bar: Label3D = null
 var _sel_mark: MeshInstance3D = null
 
+# ── WEAPONS & ARMOR ──────────────────────────────────────────────────────────
+# Mirrors npc.gd's system for the player's own members: weapon multiplies the
+# damage they deal, armor reduces damage they take. They forge upgrades from the
+# tribe's looted-material surplus (_maybe_upgrade_gear), so a well-supplied camp
+# ends up better armed. Default is the plain Club / no armor.
+const WEAPON_TIERS := [
+	{"name": "Club",  "mult": 1.0},
+	{"name": "Spear", "mult": 1.4},
+	{"name": "Bow",   "mult": 1.6},
+	{"name": "Axe",   "mult": 1.8},
+]
+const ARMOR_TIERS := [
+	{"name": "None",  "reduction": 0.0},
+	{"name": "Hide",  "reduction": 0.15},
+	{"name": "Bone",  "reduction": 0.30},
+	{"name": "Metal", "reduction": 0.45},
+]
+var weapon: int = 0
+var armor: int = 0
+
+func weapon_mult() -> float:
+	return float(WEAPON_TIERS[clampi(weapon, 0, WEAPON_TIERS.size() - 1)]["mult"])
+
+func armor_reduction() -> float:
+	return float(ARMOR_TIERS[clampi(armor, 0, ARMOR_TIERS.size() - 1)]["reduction"])
+
+func set_gear(w: int, a: int) -> void:
+	weapon = clampi(w, 0, WEAPON_TIERS.size() - 1)
+	armor = clampi(a, 0, ARMOR_TIERS.size() - 1)
+
 # productivity — feeds the "who should lead" calculation
 var contrib_food: int = 0
 var contrib_wood: int = 0
@@ -247,6 +307,7 @@ signal order_completed(member, kind, result)
 func _ready() -> void:
 	add_to_group("tribe")
 	add_to_group("has_brain")
+	_setup_slope_walking()
 	brain = Spikeling.new()
 	if not brain.load_from_text(_brain_text()):
 		push_error("TribeMember: brain failed to load")
@@ -275,6 +336,17 @@ func _ready() -> void:
 	if thought_label:
 		thought_label.font_size = 18
 	_update_label()
+
+# On flat ground the defaults were fine; on terrain they weren't. floor_snap
+# glues the body to the surface so it walks DOWN a hill instead of launching off
+# every lip and bouncing (which read as "stuck" and made members stall on
+# slopes). A wider floor_max_angle lets them climb steeper ground before the
+# engine calls it a wall. Applied to every moving body (member/npc/animal/player).
+func _setup_slope_walking() -> void:
+	floor_snap_length = 0.8
+	floor_max_angle = deg_to_rad(54.0)
+	floor_stop_on_slope = true
+	floor_constant_speed = true
 
 # the visual parts BodyAnim drives — the body and (if present) the face block
 func _anim_parts() -> Array:
@@ -306,9 +378,7 @@ func _build_combat_visuals() -> void:
 	_club_model.mesh = clm
 	_club_model.position = Vector3(0.35, 1.05, 0.3)
 	_club_model.rotation_degrees = Vector3(55, 0, 0)
-	var cmat := StandardMaterial3D.new()
-	cmat.albedo_color = Color(0.45, 0.30, 0.15)
-	_club_model.material_override = cmat
+	_club_model.material_override = MatCache.flat(Color(0.45, 0.30, 0.15))
 	_club_model.visible = false
 	add_child(_club_model)
 
@@ -350,7 +420,14 @@ func _update_combat_visuals() -> void:
 			_hp_bar.visible = false
 
 func take_hit(dmg: float, attacker) -> void:
+	dmg *= (1.0 - armor_reduction())   # armor soaks part of the blow
 	hp -= dmg
+	# betrayal: the PLAYER struck one of their own. Erodes Trust through the
+	# brain (see betray()) on top of the ordinary damage/self-defense below —
+	# a betrayed member still fights or flees like any other attack, they just
+	# also lose whatever trust they'd built up.
+	if attacker and is_instance_valid(attacker) and attacker.is_in_group("player"):
+		betray()
 	if trust_label:
 		trust_label.modulate = Color(1.0, 0.4, 0.3)
 	if anim:
@@ -432,6 +509,7 @@ func _strike_foe() -> void:
 	var dmg := 5.0 + float(get_might())
 	if manager and manager.has_method("clubs_available") and manager.clubs > 0:
 		dmg += 6.0
+	dmg *= weapon_mult()   # a better weapon swings for more
 	if anim:
 		anim.pop(0.4)
 	if _foe.has_method("take_hit"):
@@ -456,6 +534,7 @@ func _try_throw_at(foe) -> bool:
 	if f.length() > 0.01:
 		rotation.y = lerp_angle(rotation.y, atan2(f.x, f.z), 0.5)
 	var dmg := 8.0 + float(get_might())
+	dmg *= weapon_mult()
 	if anim:
 		anim.pop(0.4)
 	if foe.has_method("take_hit"):
@@ -540,6 +619,7 @@ func _physics_process(delta: float) -> void:
 		_idle_pick = (_idle_pick + 1) % 4
 	if _thought_timer <= 0.0:
 		current_thought = _ambient_thought()
+	_murmur(delta)
 	_update_label()
 	_update_thought_label()
 	_update_combat_visuals()
@@ -574,8 +654,12 @@ func _break_free() -> void:
 			if fn == null or not is_instance_valid(fn):
 				continue
 			var d := global_position.distance_to(fn.global_position)
-			if grp != "tree" and d < 1.9 and fn.has_method("take_damage"):
-				fn.take_damage(3)
+			# NO LONGER bash fences/blocks to escape -- members were destroying
+			# their OWN tribe's fortress to get unstuck. Walls are now on collision
+			# layer 4 which AI doesn't mask (block.gd), so members phase through
+			# them and never wedge on one; this recovery is only for terrain steps
+			# / each other now. (Kept the loop to find the nearest obstacle to
+			# shove away from, just without the destructive take_damage.)
 			if d < od:
 				od = d
 				obstacle = fn
@@ -593,6 +677,12 @@ func _break_free() -> void:
 		perp = -perp
 	velocity.x += (away.x * 1.5 + perp.x) * move_speed
 	velocity.z += (away.z * 1.5 + perp.z) * move_speed
+	# a HOP as well as a shove. Wedged against a block course or a terrain step,
+	# pushing sideways alone just grinds -- a bit of upward velocity lets a member
+	# clear a low obstacle (a single block is ~2m; this clears the first course
+	# and terrain lips). Only when grounded, so it can't stack into a rocket.
+	if is_on_floor():
+		velocity.y = 5.5
 	# steer the WANDER target away from the obstacle too, so we don't immediately
 	# path back into it (task targets reassert themselves on their own next frame)
 	if state == St.WANDER:
@@ -610,6 +700,18 @@ func _break_free() -> void:
 # start pulling their weight. ──
 func _auto_work(delta: float) -> void:
 	if is_busy or _leaving:
+		return
+	# CALLED OVER: stand here a moment. Without this the summons "works" and is
+	# still useless -- they arrive, and 3-7s later self-assign a chore and walk
+	# off before you've said what you called them for. "Everyone come here" is
+	# almost always the setup for a SECOND thing ("...repeat after me"), so the
+	# order isn't finished when they arrive; it's finished when you've spoken.
+	#
+	# This sits ABOVE the standing-order check deliberately. A standing job
+	# re-dispatches every 0.5-1.5s and would yank them away roughly instantly --
+	# a summons has to outrank it, briefly.
+	if _summon_hold > 0.0:
+		_summon_hold -= delta
 		return
 	if relationship <= 0.0:
 		return   # a true stranger — hasn't warmed up to you at all yet
@@ -861,7 +963,56 @@ func contribute(kind: String) -> void:
 		trust_label.modulate = Color(0.3, 1.0, 0.3)
 	if anim: anim.pop(0.55)          # a grateful little hop
 	_think("Food! (%d given) Thank you." % feed_count, 1.5)
+	# MEMORY: this is a moment that matters to them -- they'll speak from it later.
+	# Recorded with how it FELT and how it moved trust, not just that it happened.
+	TribeMemory.remember(member_name, "fed", "You",
+		"You gave me food (%d time%s now). I was %s." % [
+			feed_count, "" if feed_count == 1 else "s",
+			"hungry" if hunger > 60.0 else "glad of it"],
+		"grateful", 0.15)
 	print("[%s] fed (%d total), Trust now %.0f" % [member_name, feed_count, brain.get_potential("Trust")])
+
+# ── A betrayal the player commits against this member. Wipes whatever Trust
+# they'd built up — the SawBetray->Trust synapse is deliberately strong enough
+# (-160) to dominate any positive stimulus landing the same tick, so betrayal
+# always wins a same-step conflict rather than being partially offset by it.
+# Trust then rebuilds from zero through ordinary positive stimulation — this
+# is a one-shot wipe, not a lingering suppression (the brain has no floor for
+# negative potential across steps; see the leak-clamp in spikeling.gd's step()).
+func betray() -> void:
+	brain.stimulate("SawBetray", 80.0)
+	betrayed_count += 1
+	_attend_idle_time = 0.0
+	if trust_label:
+		trust_label.modulate = Color(1.0, 0.2, 0.2)
+	if anim: anim.pop(0.25)          # a small startled flinch (pop() only supports [0,1], no dedicated hurt anim)
+	_think("...you did that to me?", 2.2)
+	TribeMemory.remember(member_name, "betrayed", "You",
+		"You betrayed me. Whatever trust I had is gone.", "betrayed", -0.9)
+	print("[%s] betrayed, Trust now %.0f" % [member_name, brain.get_potential("Trust")])
+
+# ── LLM tie-in: a short, honest description of this member's ACTUAL live
+# brain state, meant to be appended to the persona string handed to
+# TribeLLM.say_as() (see tribe_talk.gd/_persona() and tribe_chat.gd/_say_to()).
+# Previously the LLM only ever saw the static personality label (Steady /
+# Wary / ...) and current_rank -- never the real Spikeling neuron state
+# underneath it, so two members with the same rank but very different Trust
+# potential (one freshly wronged, one steadily built) sounded identical.
+# Deliberately NOT overprescriptive: states the numbers/facts and lets the
+# model's own tone follow from them, same "hand it the real world, don't ask
+# it to be careful" lesson tribe_llm.gd's WORLD constant already relies on.
+func brain_snapshot() -> String:
+	var trust: float = brain.get_potential("Trust")
+	var parts: Array[String] = []
+	parts.append("Your trust in the Leader currently sits around %d out of 100." % int(trust))
+	if is_backing_you:
+		parts.append("You are currently backing them loyally (it took %d real moments of trust to get there)." % follow_fires)
+	else:
+		parts.append("You are not currently backing them.")
+	if betrayed_count > 0:
+		parts.append("The Leader has struck you %d time%s. You have not forgotten it." % [
+			betrayed_count, "" if betrayed_count == 1 else "s"])
+	return " ".join(parts)
 
 func _brain_tick() -> void:
 	var fired: Array = brain.step()
@@ -886,6 +1037,11 @@ func _update_rank() -> void:
 		if rose:
 			if anim: anim.pop(0.9)   # a bigger bounce as the bond deepens
 			_think(_rank_thought(current_rank))
+		# MEMORY: crossing a rank is how a bond is *remembered* -- both directions.
+		# A member who fell from Loyal back to Friend remembers that too.
+		TribeMemory.remember(member_name, "bond", "You",
+			"My feeling toward you %s to %s." % ["deepened" if rose else "cooled", current_rank],
+			"warm" if rose else "wary", 0.25 if rose else -0.25)
 
 # UI hint: how much more relationship trust is needed to reach the next rank.
 func relationship_to_next_rank() -> float:
@@ -897,9 +1053,59 @@ func relationship_to_next_rank() -> float:
 	return 0.0
 
 # ── thoughts ──
+# You could SEE members talking (a thought bubble over every head) but never
+# HEAR them: _think() and the ambient thoughts are silent -- only LLM dialogue and
+# chorus ever reached TTS. So a camp looked chatty and sounded dead. This speaks
+# whatever a member is currently "thinking" when you're close enough to overhear,
+# on a long per-member cooldown so a crowd murmurs rather than shouts in unison.
+# TribeTTS drops it if a voice is busy or you're out of range, so it self-limits.
+const MURMUR_RANGE := 9.0
+var _murmur_cd: float = 0.0
+func _murmur(delta: float) -> void:
+	_murmur_cd -= delta
+	if _murmur_cd > 0.0:
+		return
+	# stagger so ten members don't all come due on the same frame
+	_murmur_cd = randf_range(7.0, 15.0)
+	if _player_node == null or not is_instance_valid(_player_node):
+		return
+	if global_position.distance_to(_player_node.global_position) > MURMUR_RANGE:
+		return
+	var t: String = current_thought.strip_edges()
+	if t == "" or t == "..." or t == _last_murmur:
+		return
+	_last_murmur = t
+	TribeTTS.speak(self, t, false)   # non-forced: yields to real dialogue
+var _last_murmur: String = ""
+
 func _think(text: String, hold: float = 2.5) -> void:
 	current_thought = text
 	_thought_timer = hold
+	_log_line(text)
+
+## say() = _think() + VOICE. Deliberately a separate method: _think() fires for
+## routine barks ("I'm already busy!", "We've no club to hunt with!") several
+## times a minute, and having the OS read every one of those aloud would be
+## unbearable within about a minute of play. Only lines that are genuinely
+## SPEECH -- LLM dialogue, chorus, a Companion's report -- get a voice.
+## TribeTTS drops the audio if you're out of earshot or a voice is already busy;
+## the text always shows either way.
+func say(text: String, hold: float = 5.0, force: bool = false) -> void:
+	_think(text, hold)
+	TribeTTS.speak(self, text, force)
+
+## Recent lines, so standing near someone shows a short conversation log above
+## their head instead of one disappearing line. Capped and time-limited: this
+## renders every frame for every member in view, so it stays tiny.
+func _log_line(text: String) -> void:
+	var t: String = text.strip_edges()
+	if t == "" or t == "...":
+		return
+	if not _speech_log.is_empty() and str((_speech_log[-1] as Dictionary)["text"]) == t:
+		return                                   # don't log a repeat of the same line
+	_speech_log.append({"text": t, "t": Time.get_ticks_msec() / 1000.0})
+	while _speech_log.size() > SPEECH_LOG_MAX:
+		_speech_log.pop_front()
 
 func _rank_thought(rank: String) -> String:
 	match rank:
@@ -939,10 +1145,31 @@ func _on_now_backing_you() -> void:
 # ─────────────────────────────────────────────────────────────────────────────
 # ORDERS — accept/refuse by loyalty+courage, then PHYSICALLY march off to do it.
 # ─────────────────────────────────────────────────────────────────────────────
-func give_order(kind: String, paid: bool = false) -> bool:
+## `interrupt` = this came from YOU, out loud, just now. It drops whatever chore
+## they'd picked for themselves. Self-directed work (_start_job) leaves it false
+## and still queues politely behind whatever's in progress.
+func give_order(kind: String, paid: bool = false, interrupt: bool = false) -> bool:
 	if is_busy:
-		_think("I'm already busy!", 1.5)
-		return false
+		# A DIRECT ORDER FROM THE LEADER OUTRANKS A SELF-ASSIGNED CHORE.
+		#
+		# is_busy is the first gate in this function, and members self-assign work
+		# every 3-7s while each task runs 10-30s -- so is_busy is true almost
+		# permanently. Anything you said was answered with "I'm already busy!"
+		# by nearly everyone, nearly always. "Ka, get berries" only ever worked
+		# by catching Ka in the gap between chores; the Companion "not listening"
+		# was the same wall with better luck on the other side.
+		#
+		# That isn't a loyalty system, it's a coin flip on timing. Loyalty decides
+		# whether they OBEY -- being mid-errand shouldn't decide whether they even
+		# HEARD you. The chore was their own idea; you are their leader.
+		#
+		# The loyalty check below still runs: interrupting is about is_busy, not
+		# obedience, so a wary stranger can and will still tell you no.
+		if interrupt or kind == "come":
+			_abandon_task()
+		else:
+			_think("I'm already busy!", 1.5)
+			return false
 	if kind == "hunt" and (manager == null or not manager.has_method("clubs_available") or manager.clubs_available() <= 0):
 		_think("We've no club to hunt with!", 1.8)
 		return false
@@ -977,6 +1204,37 @@ func _accept_order(kind: String, paid: bool = false) -> void:
 	_task_wood = 0
 	_task_result = ""
 	match kind:
+		"come":
+			# "everyone come here" -- walk to the leader and STAY. Unlike every
+			# other task this has no work to do at the far end and does NOT
+			# _begin_return() on arrival (see St.AWAY): returning home is the
+			# opposite of what was asked. Handled in the state machine's "come"
+			# branch, which drops them into WANDER right where you're standing.
+			var pl := get_tree().get_first_node_in_group("player") as Node3D
+			if pl == null:
+				is_busy = false
+				return
+			_work_time = 30.0        # a long walk across camp is fine; forever isn't
+			# Scatter the arrival points, or ten members converge on one pixel and
+			# spend the whole time shoving each other (_apply_separation fights it).
+			# The ring stays inside interact_range (3.5) so everyone who answers
+			# lands close enough to TALK to -- a summons that parks people at 5m
+			# is out of chat range and half the point of calling them is gone.
+			#
+			# The offset is stored, not the destination: St.AWAY re-aims at
+			# player_position + _come_offset EVERY FRAME. A snapshot taken here
+			# would send them to where you were STANDING when you spoke -- and
+			# you're going to keep walking while they cross camp, because that's
+			# what anyone does after calling someone over. They'd trail to an
+			# empty patch of dirt and stop, which from your side is indis-
+			# tinguishable from being ignored. Keeping the offset fixed (rather
+			# than re-rolling it) is what stops the ring from jittering.
+			var a: float = randf() * TAU
+			var r: float = 1.4 + randf() * 1.7      # 1.4 .. 3.1
+			_come_offset = Vector3(cos(a) * r, 0.0, sin(a) * r)
+			_target = pl.global_position + _come_offset
+			_target_node = null
+			_think("Coming.", 2.0)
 		"gather":
 			_target_node = _nearest_food_source()
 			if _target_node:
@@ -1040,6 +1298,13 @@ func _accept_order(kind: String, paid: bool = false) -> void:
 			else:
 				_begin_fallback("No wanderers nearby to recruit...")
 	state = St.AWAY
+	# SPEAK the acknowledgement, don't just think it. "so I know if they are doing
+	# it" -- the match above set a task-specific line ("Berries! On my way."); this
+	# voices it (heard if you're close, once audio's routed) and flashes it up top
+	# so you get confirmation the order landed even across camp.
+	say(current_thought, 2.5)
+	if manager and manager.has_method("flash_order_ack"):
+		manager.flash_order_ack(member_name, kind, true)
 	print("[%s] ACCEPTED order: %s (rank %s)" % [member_name, kind, current_rank])
 
 # go to a random distant spot (used by scout, or when nothing's around to work)
@@ -1052,7 +1317,7 @@ func _begin_fallback(msg: String) -> void:
 
 const DEPOSIT_RANGE := 3.0   # how close to the stockpile counts as "back" — generous on
 							  # purpose so a crowd converging on one exact point doesn't
-                              # perpetually jostle for position via separation forces
+							  # perpetually jostle for position via separation forces
 
 func _begin_return() -> void:
 	if _task_kind == "raid":
@@ -1137,7 +1402,11 @@ func _do_recruit() -> void:
 	manager.recruit_neutral(_target_node)
 	_task_result = "recruited a new member!"
 	if manager.has_method("notify"):
-		manager.notify("%s won over a wanderer using food." % member_name)
+		# One of YOUR members recruited a wanderer -> "Your Tribe" box.
+		if manager.has_method("notify_cat"):
+			manager.notify_cat("tribe", "%s won over a wanderer using food." % member_name)
+		else:
+			manager.notify("%s won over a wanderer using food." % member_name)
 
 func _nearest_tree() -> Node3D:
 	var best: Node3D = null
@@ -1161,9 +1430,11 @@ func _retarget() -> Node3D:
 
 func _refuse_order(kind: String) -> void:
 	match kind:
-		"hunt":  _think("Hunt? I don't trust you enough for that.", 2.5)
-		"scout": _think("Scout a rival tribe? No. Too dangerous.", 2.5)
-		_:       _think("...no.", 2.0)
+		"hunt":  say("Hunt? I don't trust you enough for that.", 2.5)
+		"scout": say("Scout a rival tribe? No. Too dangerous.", 2.5)
+		_:       say("...no.", 2.0)
+	if manager and manager.has_method("flash_order_ack"):
+		manager.flash_order_ack(member_name, kind, false)
 	_play_refuse_anim()
 	print("[%s] REFUSED order: %s (rank %s — not loyal enough)" % [member_name, kind, current_rank])
 	# is_busy/state are untouched by a refusal — they just resume whatever
@@ -1213,6 +1484,28 @@ func _abort_chore_for_formation() -> void:
 	_target_node = null
 	state = St.WANDER
 
+## Drop whatever you're doing, cleanly. Unlike _complete_task() this banks
+## NOTHING -- you never got the haul home, so partial progress is lost. That's
+## honest: the cost of being called away mid-chop is the chop.
+##
+## THE CLUB IS THE WHOLE REASON THIS IS A FUNCTION. A hunt calls
+## manager.reserve_club(), and the club only ever goes back to the rack via
+## release_club() in _complete_task(). Cancel a hunt without this and the club
+## is gone for the rest of the run -- clubs_available() drops by one, silently
+## and permanently, until nobody can hunt at all. Interrupting a hunter would
+## quietly break hunting.
+func _abandon_task() -> void:
+	if _has_club and manager and manager.has_method("release_club"):
+		manager.release_club()
+		_has_club = false
+	is_busy = false
+	_task_kind = ""
+	_target_node = null
+	_task_food = 0
+	_task_mats = 0
+	_task_wood = 0
+	_task_result = ""
+
 func _complete_task() -> void:
 	var k := _task_kind
 	var got_food := _task_food
@@ -1256,7 +1549,11 @@ func _complete_task() -> void:
 			var st: int = _scouted_camp.strength if "strength" in _scouted_camp else 0
 			_task_result = "scouted the %s (strength %d)" % [nm, st]
 			if manager and manager.has_method("notify"):
-				manager.notify("%s reports back: found the %s, strength %d!" % [member_name, nm, st])
+				# Your scout-member reporting back -> "Your Tribe" box.
+				if manager.has_method("notify_cat"):
+					manager.notify_cat("tribe", "%s reports back: found the %s, strength %d!" % [member_name, nm, st])
+				else:
+					manager.notify("%s reports back: found the %s, strength %d!" % [member_name, nm, st])
 		else:
 			_task_result = "found nothing to scout"
 		_scouted_camp = null
@@ -1282,6 +1579,9 @@ func _complete_task() -> void:
 		_update_rank()
 	_task_paid = false
 
+	# a well-supplied camp lets members forge better gear from looted materials
+	_maybe_upgrade_gear()
+
 	var msg: String = _task_result if _task_result != "" else "nothing this time"
 	_think("Done. %s" % msg, 3.0)
 	print("[%s] COMPLETED %s -> %s" % [member_name, k, msg])
@@ -1302,7 +1602,47 @@ func _scout_report() -> String:
 # ── raid / combat helpers (used by the manager) ──
 func get_might() -> int:
 	var p: Dictionary = PERSONALITIES.get(personality, PERSONALITIES["Steady"])
-	return int(p["might"]) + int(RANK_LOYALTY.get(current_rank, 0) / 10.0) + int(p["courage"] / 10.0)
+	# gear counts toward raid might too — weapon adds punch, armor adds staying power
+	var gear_might: int = weapon * 3 + armor * 2
+	return int(p["might"]) + int(RANK_LOYALTY.get(current_rank, 0) / 10.0) + int(p["courage"] / 10.0) + gear_might
+
+# Forge a gear upgrade when the tribe has looted-material surplus to spare.
+# Spends the shared `materials` pool (skins/hides — the camp's common crafting
+# stock). Cheap and occasional: called only on task completion, gated by cost
+# and a dice roll, so gear creeps up over a session rather than spiking. Weapon
+# and armor alternate so members don't end up lopsided. Low-risk: fully guarded,
+# does nothing if the manager can't spend.
+const _GEAR_MAT_COST := 4
+func _maybe_upgrade_gear() -> void:
+	if manager == null:
+		return
+	if weapon >= WEAPON_TIERS.size() - 1 and armor >= ARMOR_TIERS.size() - 1:
+		return
+	if randf() > 0.35:
+		return
+	if not manager.has_method("spend_materials") or not ("materials" in manager):
+		return
+	if int(manager.materials) < _GEAR_MAT_COST:
+		return
+	# raise whichever track is lower (armor wins ties, so survivability comes first),
+	# respecting each track's ceiling
+	var wmax: bool = weapon >= WEAPON_TIERS.size() - 1
+	var amax: bool = armor >= ARMOR_TIERS.size() - 1
+	var raise_weapon: bool
+	if amax:
+		raise_weapon = true
+	elif wmax:
+		raise_weapon = false
+	else:
+		raise_weapon = weapon < armor
+	if not manager.spend_materials(_GEAR_MAT_COST):
+		return
+	if raise_weapon:
+		weapon += 1
+		_think("Forged a better weapon.", 2.0)
+	else:
+		armor += 1
+		_think("Fashioned some armor.", 2.0)
 
 # ── starvation: called every frame by the manager while the tribe has no food ──
 func starve(delta: float) -> void:
@@ -1461,6 +1801,27 @@ func _move(delta: float) -> void:
 				# hold an assigned post on the leader's perimeter, indefinitely —
 				# only ends via reassignment, never times out or auto-returns
 				_guard_step(delta)
+			elif _task_kind == "come":
+				# RE-AIM at the leader every frame. You keep walking after calling
+				# people over; a destination snapshotted when you spoke sends them
+				# to bare ground and looks exactly like being ignored.
+				if _player_node != null:
+					_target = _player_node.global_position + _come_offset
+					_target.y = global_position.y
+				# arrive and STOP. Every other fixed-spot task calls _begin_return()
+				# here; "come here" must not — walking home is precisely what you
+				# didn't ask for. Drop straight into WANDER so they mill about
+				# where you're standing and stay available for the next order.
+				if _arrived(_target) or timed_out:
+					_halt()
+					is_busy = false
+					_task_kind = ""
+					state = St.WANDER
+					_summon_hold = SUMMON_HOLD   # stand here; you called for a reason
+					if not timed_out:
+						_think("You called?", 2.5)
+				else:
+					_steer_to(_target, delta)
 			else:
 				# fixed spot (scout / fallback): go there, then head home.
 				# scouts stop at scouting range so they don't march into the camp.
@@ -1698,7 +2059,30 @@ func _update_label() -> void:
 	trust_label.text = "%s  [%s · %s]\nTrust: %d%%%s%s%s" % [member_name, current_rank, personality, pct, next_hint, status, hint]
 	trust_label.modulate = trust_label.modulate.lerp(RANK_COLORS.get(current_rank, Color.WHITE), 0.05)
 
+## Close enough to be in the conversation -> show the last few lines as a log.
+## Further away -> just the current line, as before. The radius is the point:
+## a camp of 10 members each showing 3 lines would be an unreadable wall of text
+## from across the clearing, and this label renders every frame for everyone in
+## view. Proximity is what makes it a conversation rather than a spreadsheet.
 func _update_thought_label() -> void:
+	if not thought_label:
+		return
+	if _player_node != null and _speech_log.size() > 1 \
+			and global_position.distance_to(_player_node.global_position) <= SPEECH_LOG_RADIUS:
+		var now: float = Time.get_ticks_msec() / 1000.0
+		var lines: Array[String] = []
+		for e in _speech_log:
+			var d: Dictionary = e
+			if now - float(d["t"]) <= SPEECH_LOG_TTL:
+				lines.append(str(d["text"]))
+		if lines.size() > 1:
+			# oldest at top, newest last -- the newest is also current_thought,
+			# so the label reads as a transcript ending in what they just said
+			thought_label.text = "\n".join(lines)
+			return
+	_update_thought_label_single()
+
+func _update_thought_label_single() -> void:
 	if not thought_label:
 		return
 	thought_label.text = '"%s"' % current_thought
