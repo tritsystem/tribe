@@ -27,6 +27,19 @@ var _entry: LineEdit
 var _target: Node = null       # who we're addressing (null while _broadcast)
 var _broadcast := false         # TAB'd past the last member -> talk to everyone
 var _history: Array[String] = []
+# npc_name -> the last thing THEY said in this live exchange. Deliberately
+# separate from TribeMemory: context_for()'s echo guard excludes an NPC's own
+# very-recent talked/heard entries on purpose (to stop it looping on its own
+# last line as if it were a fresh memory across SEPARATE turns), but that
+# means a direct in-the-moment follow-up ("why not?") lost its own antecedent
+# entirely -- caught live: asked "now do u trust me", Wen answered with real
+# ambivalence ("I'm still not sure if I can fully give myself to you"), then
+# "why not" got a reply that ignored that ambivalence completely and pivoted
+# back to food, because nothing told the model what "why not" was even
+# responding to. This is short-term conversational coherence, not long-term
+# memory, and needs its own always-included channel instead of routing
+# through the (correctly) filtered memory pool.
+var _last_own_reply: Dictionary = {}
 
 func _ready() -> void:
 	TribeLLM.line_ready.connect(_on_line)
@@ -253,9 +266,22 @@ func _say_to(member: Node, text: String, delay: float) -> void:
 	var guard := " Do not claim to remember a past conversation unless it is in " \
 		+ "your memories above. Answer from your CURRENT feelings; your standing " \
 		+ "is '%s', so let it decide how much you trust the Leader." % str(member.get("current_rank"))
+	# short-term conversational continuity, separate from long-term memory --
+	# see _last_own_reply's declaration for why this can't route through
+	# context_for() (its echo guard deliberately excludes this exact thing).
+	# Staleness-gated the same way as that echo guard: if you closed chat and
+	# came back much later, "just now" would be actively misleading.
+	const CONTINUITY_WINDOW := 90.0
+	var continuity: String = ""
+	if _last_own_reply.has(npc_name):
+		var rec: Dictionary = _last_own_reply[npc_name]
+		if (Time.get_ticks_msec() / 1000.0) - float(rec["t"]) < CONTINUITY_WINDOW:
+			continuity = " (Just now, you told them: \"%s\" -- if what they're saying " % str(rec["text"]) \
+				+ "now is a direct follow-up to that, answer as a continuation of it, " \
+				+ "not a new unrelated thought.)"
 	TribeLLM.say_as(npc_name, "You", persona,
 		TribeMemory.context_for(npc_name, "You"),
-		"Your leader just said to you: \"%s\". Answer them directly.%s" % [text, guard],
+		"Your leader just said to you: \"%s\".%s Answer them directly.%s" % [text, continuity, guard],
 		_fallback(str(member.get("personality"))), "player", TribeTalk.roster_string())
 
 func _flavour(p: String) -> String:
@@ -289,6 +315,7 @@ func _on_line(speaker: String, listener: String, text: String, tag: String) -> v
 		_target.say(text, HOLD, true)   # above their head, and out loud
 	# and they remember answering you
 	TribeMemory.remember(speaker, "talked", "You", "I told you: \"%s\"" % text, "neutral", 0.02)
+	_last_own_reply[speaker] = {"text": text, "t": Time.get_ticks_msec() / 1000.0}
 
 func _push(line: String) -> void:
 	_history.append(line)
