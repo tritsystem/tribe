@@ -18,6 +18,7 @@ config/icon="res://icon.svg"
 [autoload]
 
 GraphicsQuality="*res://graphics_quality.gd"
+TribePoetry="*res://tribe_poetry.gd"
 
 [physics]
 
