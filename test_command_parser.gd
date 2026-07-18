@@ -178,6 +178,23 @@ func _ready() -> void:
 	_ck(C, "come",                                "order", "come",  "-")
 	_ck(C, "scout",                               "order", "scout", "-")
 
+	# DIRECTED weapon crafting: an explicit choice ("Ka, craft a spear")
+	# instead of tribemember.gd's random automatic gear upgrade. Multi-word
+	# phrases only, deliberately -- a bare "spear"/"bow"/"axe" trigger is
+	# exactly the single-common-word risk this parser's own STOPWORDS
+	# discipline exists to guard against.
+	print("\n=== ROUTE: directed weapon crafting ===")
+	_ck(C, "Ka, craft a spear",                   "order", "craft_spear", "Ka")
+	_ck(C, "carve a spear",                       "order", "craft_spear", "-")
+	_ck(C, "forge a bow",                         "order", "craft_bow",   "-")
+	_ck(C, "make an axe",                         "order", "craft_axe",   "-")
+	_ck(C, "craft a club",                        "order", "craft_club",  "-")
+	# a bare "spear"/"bow"/"axe" alone must NOT fire -- no verb-shaped
+	# phrase, just a noun, same discipline as "there's a rabbit over there"
+	# staying conversation
+	_no(C, "I found a spear")
+	_no(C, "nice bow")
+
 	# "here" = WHERE, "around me" = WHO. These two sentences read almost the same
 	# and mean different things; nearby=true on a summons silently shrinks it to
 	# people already standing next to you.

@@ -51,7 +51,22 @@ const VERBS := {
 	"come":   ["come here", "come", "gather round", "gather around", "over here",
 		"to me", "on me", "rally", "regroup", "form up", "assemble",
 		"follow me", "with me"],
+	# DIRECTED weapon crafting (2026-07-17): a specific choice ("Ka, craft a
+	# spear") instead of tribemember.gd's _maybe_upgrade_gear()'s random
+	# automatic pick. Multi-word phrases only, deliberately -- no bare
+	# "spear"/"bow"/"axe" trigger, since those are exactly the kind of
+	# single common word this parser's own STOPWORDS discipline exists to
+	# guard against reintroducing (see the "well"->Vel history above).
+	"craft_club":  ["craft a club", "carve a club", "forge a club", "make a club"],
+	"craft_spear": ["craft a spear", "carve a spear", "forge a spear", "make a spear"],
+	"craft_bow":   ["craft a bow", "carve a bow", "forge a bow", "make a bow"],
+	"craft_axe":   ["craft an axe", "carve an axe", "forge an axe", "make an axe"],
 }
+
+# verb kind -> tribemember.gd's WEAPON_TIERS index. Used in _do_order() to
+# bypass give_order()/ORDER_RISK entirely for crafting -- see its comment
+# there for why (not dangerous, same precedent as build/carve).
+const CRAFT_TIERS := {"craft_club": 0, "craft_spear": 1, "craft_bow": 2, "craft_axe": 3}
 
 # DELIBERATELY ABSENT: "build" and "carve".
 #
@@ -133,7 +148,8 @@ const STOPWORDS := ["went", "when", "then", "them", "they", "well", "will",
 # would fire a wood order at nobody in particular. If a verb can't be obeyed, it
 # doesn't belong here.
 const IMPERATIVE_STARTS := ["go ", "get ", "grab ", "fetch ", "bring ", "chop ",
-	"gather ", "hunt ", "scout ", "find ", "come ", "follow ", "head ", "investigate "]
+	"gather ", "hunt ", "scout ", "find ", "come ", "follow ", "head ", "investigate ",
+	"craft ", "carve ", "forge ", "make "]
 
 const GROUP_WORDS := ["everyone", "everybody", "all of you", "you all", "y'all",
 	"everyones", "the tribe", "tribe"]
@@ -460,12 +476,24 @@ func _do_order(p: Dictionary, spoken: String, source: String) -> bool:
 
 	var accepted: Array = []
 	var refused: Array = []
+	# DIRECTED weapon crafting bypasses give_order()/ORDER_RISK entirely --
+	# not dangerous, same precedent this file's own comment gives for
+	# build/carve (deliberately absent from ORDER_RISK too).
+	var craft_tier: int = CRAFT_TIERS.get(verb, -1)
 	for m in targets:
-		if not (is_instance_valid(m) and m.has_method("give_order")):
+		if not is_instance_valid(m):
+			continue
+		var nm: String = str(m.get("member_name"))
+		if craft_tier >= 0:
+			if m.has_method("craft_weapon") and m.craft_weapon(craft_tier):
+				accepted.append(nm)
+			else:
+				refused.append(nm)
+			continue
+		if not m.has_method("give_order"):
 			continue
 		# give_order() owns the refusal logic (loyalty + courage vs risk) and
 		# already speaks the reason above their head. We only tally.
-		var nm: String = str(m.get("member_name"))
 		# interrupt=true: you SAID this, to them, just now. It beats the chore they
 		# picked for themselves -- see give_order. Loyalty still decides obedience.
 		if m.give_order(verb, false, true):

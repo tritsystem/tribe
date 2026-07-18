@@ -326,6 +326,26 @@ func set_gear(w: int, a: int) -> void:
 	weapon = clampi(w, 0, WEAPON_TIERS.size() - 1)
 	armor = clampi(a, 0, ARMOR_TIERS.size() - 1)
 
+## DIRECTED weapon crafting -- an explicit choice ("Ka, craft a spear"),
+## as opposed to _maybe_upgrade_gear()'s random automatic upgrade. Spends the
+## same shared materials pool at the same cost; bypasses ORDER_RISK entirely
+## (crafting isn't dangerous, same precedent as "build"/"carve" -- see the
+## comment on ORDER_RISK). Returns false (and does nothing) if materials are
+## short, same fail-soft discipline as _maybe_upgrade_gear().
+func craft_weapon(tier: int) -> bool:
+	if manager == null or not manager.has_method("spend_materials"):
+		return false
+	tier = clampi(tier, 0, WEAPON_TIERS.size() - 1)
+	if not manager.spend_materials(_GEAR_MAT_COST):
+		_think("Not enough materials to craft that yet.", 2.0)
+		return false
+	weapon = tier
+	var wname: String = str(WEAPON_TIERS[tier]["name"])
+	_think("Crafted a %s." % wname, 2.0)
+	TribeMemory.remember(member_name, "crafted", "You",
+		"You had me craft a %s." % wname, "neutral", 0.02)
+	return true
+
 # productivity — feeds the "who should lead" calculation
 var contrib_food: int = 0
 var contrib_wood: int = 0
