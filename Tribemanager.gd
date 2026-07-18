@@ -979,20 +979,38 @@ func _weather_tick(delta: float) -> void:
 	notify_cat(CAT_TRIBES, "The weather turns to %s." % WEATHER_NAMES[current_weather])
 	_apply_weather_visuals()
 
+var _cached_world_env: WorldEnvironment = null
+var _cached_sun: DirectionalLight3D = null
+var _weather_visuals_searched := false
+
 ## Best-effort visual: reuses graphics_quality.gd's own WorldEnvironment/
 ## DirectionalLight3D lookup pattern. If the scene has neither (a headless
 ## test, a minimal scene), this is a harmless no-op — the mechanical effects
 ## above (visibility_mult/hunger_mult) work regardless.
+##
+## PERF FIX (2026-07-26): find_children("*", ..., true, false) is a
+## recursive search over the ENTIRE scene tree (tens of thousands of nodes
+## in a populated world) -- done TWICE, every single time weather changes.
+## Harmless on its own (weather changes every 60-180s), but a real,
+## measurable per-frame HITCH each time it fired, on top of everything else
+## going on that frame. The result never changes at runtime (the world's
+## WorldEnvironment/DirectionalLight3D are scene-authored, not
+## created/destroyed during play), so it only needs to be found ONCE and
+## cached -- every weather change after that is pure property assignment.
 func _apply_weather_visuals() -> void:
-	var we_nodes: Array = get_tree().root.find_children("*", "WorldEnvironment", true, false)
-	if we_nodes.is_empty():
-		return
-	var we: WorldEnvironment = we_nodes[0] as WorldEnvironment
+	if not _weather_visuals_searched:
+		_weather_visuals_searched = true
+		var we_nodes: Array = get_tree().root.find_children("*", "WorldEnvironment", true, false)
+		if not we_nodes.is_empty():
+			_cached_world_env = we_nodes[0] as WorldEnvironment
+		var sun_nodes: Array = get_tree().root.find_children("*", "DirectionalLight3D", true, false)
+		if not sun_nodes.is_empty():
+			_cached_sun = sun_nodes[0] as DirectionalLight3D
+	var we: WorldEnvironment = _cached_world_env
 	if we == null or we.environment == null:
 		return
 	var env := we.environment
-	var sun_nodes: Array = get_tree().root.find_children("*", "DirectionalLight3D", true, false)
-	var sun: DirectionalLight3D = sun_nodes[0] as DirectionalLight3D if not sun_nodes.is_empty() else null
+	var sun: DirectionalLight3D = _cached_sun
 	match current_weather:
 		Weather.CLEAR:
 			env.fog_enabled = false
