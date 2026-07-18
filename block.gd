@@ -1,6 +1,6 @@
 extends StaticBody3D
 # ─────────────────────────────────────────────────────────────────────────────
-# Block — a single placeable wood cube, the building unit for player- and
+# Block — a single placeable wall cube, the building unit for player- and
 # NPC-built fortresses (think Minecraft): walls, mazes, towers are all just
 # many of these placed on a fixed grid (SIZE units) so they actually align
 # and stack cleanly. Builders (player or any NPC with the walk-to-and-place
@@ -8,37 +8,67 @@ extends StaticBody3D
 # the target cell to place one — see BUILD_RANGE in whichever script is
 # doing the placing. Destroyable like any other built structure.
 # In group "block".
+#
+# MATERIAL TIERS (2026-07-22): a block now carries a `material_tier` (0 Wood,
+# 1 Stone, 2 Metal) set by whoever places it (see Tribemanager.try_build_block
+# / material_tier) -- a real "upgrade to better material" as the tribe's
+# stockpile of raw materials grows, not just a repaint. Each tier gets its
+# own HP (a stone wall genuinely outlasts a wooden one) and colour.
+#
+# BUG FIX: the OLD version had a single `color` instance var that was never
+# actually used past the very FIRST block ever built -- `_shared_mat` was
+# built once, lazily, from whichever instance happened to construct it
+# first, and every block after that reused that one material regardless of
+# its own `color`. That's why every block in the game always looked
+# identical no matter what callers set. Fixed by caching material PER TIER
+# (a small, fixed-size Dictionary keyed by material_tier) instead of a
+# single lazily-built shared material -- still one shared instance per tier
+# (same batching/perf win the old code was going for), just correctly keyed
+# this time. The mesh geometry itself doesn't change between tiers (a block
+# is a block regardless of material), so it stays a single shared BoxMesh.
 # ─────────────────────────────────────────────────────────────────────────────
 
 const SIZE := 2.0
 
+const TIER_NAMES  := ["Wood", "Stone", "Metal"]
+const TIER_HP     := [16.0, 32.0, 56.0]
+const TIER_COLORS := [Color(0.45, 0.32, 0.18), Color(0.55, 0.55, 0.58), Color(0.74, 0.76, 0.80)]
+
+var material_tier: int = 0
 var hp: float = 16.0
 var owner_tribe = null   # set when a rival WorldTribe places this (cleanup bookkeeping)
-var color: Color = Color(0.45, 0.32, 0.18)
 
-# one material and one mesh shared by every block in the game, rather than
-# each instance allocating its own — a castle wall is 30-60+ of these, and
-# at 1000 tribes a NEAR/MID cluster can mean hundreds live at once. Unique
-# materials per-instance kill batching and pile up GPU resources fast; this
-# was a real contributor to both the low framerate and the earlier Vulkan
-# "uniforms never supplied" error during heavy spawn bursts.
+# one shared mesh for every block regardless of tier — a castle wall is
+# 30-60+ of these, and at 1000 tribes a NEAR/MID cluster can mean hundreds
+# live at once. Unique meshes per-instance kill batching and pile up GPU
+# resources fast; this was a real contributor to both the low framerate and
+# the earlier Vulkan "uniforms never supplied" error during heavy spawn
+# bursts.
 static var _shared_mesh: BoxMesh = null
-static var _shared_mat: StandardMaterial3D = null
+static var _mat_cache: Dictionary = {}   # material_tier -> StandardMaterial3D
 
 func _ready() -> void:
 	add_to_group("block")
-	_build()
+	# STRUCTURE COLLISION LAYER (bit 4). Walls used to sit on the default layer 1,
+	# so tribe members physically JAMMED on their own walls with no pathfinding to
+	# route around them -- and the stuck-recovery bashed the wall to escape,
+	# wrecking the fortress. Now walls are on layer 4: the PLAYER masks it (walls
+	# still block you -- siege feel + your own gated camp), but AI characters
+	# (mask 1) phase through, so members/raiders never wedge on a wall. Walls are
+	# still real nodes found by group+distance for attacks/conquest (HP-gated),
+	# just not a physical trap for the AI.
+	collision_layer = 8
+	var t: int = clampi(material_tier, 0, TIER_HP.size() - 1)
+	hp = TIER_HP[t]
+	_build(t)
 
-func _build() -> void:
+func _build(t: int) -> void:
 	if _shared_mesh == null:
 		_shared_mesh = BoxMesh.new()
 		_shared_mesh.size = Vector3(SIZE, SIZE, SIZE) * 0.97   # tiny gap so adjoining faces don't z-fight
-	if _shared_mat == null:
-		_shared_mat = StandardMaterial3D.new()
-		_shared_mat.albedo_color = color
 	var mesh := MeshInstance3D.new()
 	mesh.mesh = _shared_mesh
-	mesh.material_override = _shared_mat
+	mesh.material_override = _get_mat(t)
 	add_child(mesh)
 
 	var col := CollisionShape3D.new()
@@ -46,6 +76,14 @@ func _build() -> void:
 	shape.size = Vector3(SIZE, SIZE, SIZE)
 	col.shape = shape
 	add_child(col)
+
+static func _get_mat(t: int) -> StandardMaterial3D:
+	if _mat_cache.has(t):
+		return _mat_cache[t]
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = TIER_COLORS[clampi(t, 0, TIER_COLORS.size() - 1)]
+	_mat_cache[t] = mat
+	return mat
 
 func take_damage(d: float, _attacker = null) -> void:
 	hp -= d

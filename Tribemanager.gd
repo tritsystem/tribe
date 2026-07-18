@@ -101,6 +101,54 @@ var start_menu       = null
 var _tribe_cap: int  = 16
 var _start_size: int = 3
 var fortress_built: bool = false   # set once an autonomous solo build run finishes
+
+# ── FORTRESS EXPANSION + MATERIAL UPGRADES (2026-07-22) ────────────────────
+# Previously fortress_built was a one-shot flag: the tribe raised ONE
+# fortress and then suggest_job() never proposed "build" again, ever.
+# fortress_tier replaces that dead end with real, repeated growth -- each
+# completed ring bumps the tier, fence_ring_plan() scales radius/gate count/
+# teepee count with it, and suggest_job() keeps proposing bigger builds
+# (gated by steeper wood/member requirements per tier, same as the original
+# one-shot gate's own resource check) until MAX_FORTRESS_TIER.
+#
+# material_tier is the separate "better material" upgrade: a wooden fortress
+# can become a stone one, then a metal one, as the tribe accumulates real
+# `materials` (skins) -- see try_upgrade_material()/_material_upgrade_tick().
+# It's genuinely mechanical, not a repaint: block.gd's own TIER_HP means a
+# Stone/Metal wall actually outlasts a Wood one, and every NEW block placed
+# after an upgrade uses the tribe's current best material automatically.
+const MAX_FORTRESS_TIER    := 4
+const FORTRESS_BASE_RADIUS := 10.0
+const FORTRESS_RADIUS_GROWTH := 4.0
+var fortress_tier: int = 0
+
+const MATERIAL_TIER_NAMES := ["Wood", "Stone", "Metal"]
+# materials needed to REACH that tier index (index 0 is free -- you start in Wood)
+const MATERIAL_UPGRADE_COST := [0, 40, 90]
+var material_tier: int = 0
+var _material_upgrade_cd: float = 8.0
+
+# ── ENVIRONMENT / WEATHER (2026-07-22) ──────────────────────────────────────
+# A real, mechanical weather cycle -- not just an announcement. current_weather
+# changes on a randomized timer and has two genuine effects other systems
+# actually read: visibility_mult() scales every vision-gated pick/sense check
+# in tribemember.gd (fog/storm means members work with a smaller effective
+# SIGHT_RADIUS and are more likely to be caught off guard by a raider they
+# didn't see coming), and hunger_mult() scales hunger drain (a storm is cold
+# and miserable, not free). Visuals piggyback on the SAME WorldEnvironment/
+# DirectionalLight3D lookup graphics_quality.gd already uses, so a real storm
+# actually looks darker and hazier, not just a text notification.
+enum Weather { CLEAR, RAIN, STORM, FOG }
+const WEATHER_NAMES := ["Clear", "Rain", "Storm", "Fog"]
+const WEATHER_VISIBILITY := { Weather.CLEAR: 1.0, Weather.RAIN: 0.7, Weather.STORM: 0.45, Weather.FOG: 0.5 }
+const WEATHER_HUNGER_MULT := { Weather.CLEAR: 1.0, Weather.RAIN: 1.05, Weather.STORM: 1.25, Weather.FOG: 1.0 }
+# CLEAR weighted heaviest so bad weather is a real event, not half of all time
+const WEATHER_CHOICES := [Weather.CLEAR, Weather.CLEAR, Weather.CLEAR, Weather.RAIN, Weather.STORM, Weather.FOG]
+const WEATHER_MIN_DURATION := 60.0
+const WEATHER_MAX_DURATION := 180.0
+
+var current_weather: int = Weather.CLEAR
+var _weather_timer: float = 20.0   # a short calm start before the first shift
 									# the whole fence_ring_plan() — see suggest_job()
 									# and tribemember.gd's begin_build()/_build_step()
 
@@ -815,24 +863,127 @@ func try_build_teepee(pos: Vector3, by_player: bool = false) -> bool:
 
 const BlockScript = preload("res://block.gd")
 
-# a single placeable wood block (block.gd) — the building unit for player-
+# a single placeable wall block (block.gd) — the building unit for player-
 # and NPC-raised fortresses/mazes. Builders (player or any walk-to-and-place
 # NPC) must already be standing next to `pos`; this just spends the wood and
 # places it, snapped to the shared block grid so different builders' work
 # still lines up.
+#
+# MATERIAL UPGRADE (2026-07-22): every new block automatically uses the
+# tribe's CURRENT material_tier (Wood/Stone/Metal — see try_upgrade_material())
+# -- an upgrade takes effect on whatever gets built from that point on, real
+# and immediate, not retrofitted onto blocks already standing. Better
+# material costs a bit more wood too (worked stone/metal takes more effort
+# to place than raw timber), on top of the real `materials` spent once to
+# unlock the tier in the first place.
 func try_build_block(pos: Vector3, by_player: bool = false) -> bool:
+	var cost: int = BLOCK_COST + material_tier
 	if by_player and not _within_build_range(pos):
-		_flash("Too far from camp — stay within %d of the stockpile." % int(BUILD_RANGE))
+		notify_cat(CAT_YOU, "Too far from camp — stay within %d of the stockpile." % int(BUILD_RANGE))
 		return false
-	if wood < BLOCK_COST:
-		_flash("Need %d wood for a block — chop more trees." % BLOCK_COST)
+	if wood < cost:
+		notify_cat(CAT_YOU, "Need %d wood for a block — chop more trees." % cost)
 		return false
-	wood -= BLOCK_COST
+	wood -= cost
 	var b = StaticBody3D.new()
 	b.set_script(load("res://block.gd"))
+	b.material_tier = material_tier
 	add_child(b)
-	b.global_position = BlockScript.snap(pos)
+	# flatten the footprint, then stack the block ON the levelled ground: pos.y is
+	# the course height (1 = ground course, 3 = second course), added to the seat
+	# height so a wall built on a slope rises in even courses instead of floating.
+	var seat := seat_build(pos.x, pos.z, 1.4)
+	var snapped: Vector3 = BlockScript.snap(pos)
+	snapped.y = seat + pos.y
+	b.global_position = snapped
 	return true
+
+## Spend real `materials` to unlock the NEXT construction material tier
+## (Wood -> Stone -> Metal). Returns false, spending nothing, if there's no
+## further tier or the stockpile can't afford it yet -- same fail-honestly
+## contract as every other try_build_*().
+func try_upgrade_material() -> bool:
+	var next: int = material_tier + 1
+	if next >= MATERIAL_TIER_NAMES.size():
+		return false
+	if materials < MATERIAL_UPGRADE_COST[next]:
+		return false
+	materials -= MATERIAL_UPGRADE_COST[next]
+	material_tier = next
+	notify_cat(CAT_TRIBE, "The tribe has learned to build in %s." % MATERIAL_TIER_NAMES[material_tier])
+	return true
+
+## Background check, same pattern as _recruit_tick()/_raid_tick(): the
+## tribe upgrades material the moment it can genuinely afford to, without
+## needing a specific member to walk anywhere or perform an action -- this
+## is a stockpile-level decision (what future construction is BUILT FROM),
+## not a physical task.
+func _material_upgrade_tick(delta: float) -> void:
+	_material_upgrade_cd -= delta
+	if _material_upgrade_cd > 0.0:
+		return
+	_material_upgrade_cd = 20.0
+	if material_tier + 1 < MATERIAL_TIER_NAMES.size() \
+			and materials >= MATERIAL_UPGRADE_COST[material_tier + 1]:
+		try_upgrade_material()
+
+## Members multiply their SIGHT_RADIUS-based checks by this — 1.0 in clear
+## weather (no change from before this system existed), lower in rain/storm/
+## fog. Callers that don't check for weather at all are unaffected (they
+## simply never call this), so this is purely additive.
+func visibility_mult() -> float:
+	return float(WEATHER_VISIBILITY.get(current_weather, 1.0))
+
+## Hunger drains faster in bad weather (cold, wet, miserable) — read by
+## tribemember.gd's _hunger_step().
+func hunger_mult() -> float:
+	return float(WEATHER_HUNGER_MULT.get(current_weather, 1.0))
+
+func _weather_tick(delta: float) -> void:
+	_weather_timer -= delta
+	if _weather_timer > 0.0:
+		return
+	_weather_timer = randf_range(WEATHER_MIN_DURATION, WEATHER_MAX_DURATION)
+	var new_weather: int = WEATHER_CHOICES[randi() % WEATHER_CHOICES.size()]
+	if new_weather == current_weather:
+		return
+	current_weather = new_weather
+	notify_cat(CAT_TRIBES, "The weather turns to %s." % WEATHER_NAMES[current_weather])
+	_apply_weather_visuals()
+
+## Best-effort visual: reuses graphics_quality.gd's own WorldEnvironment/
+## DirectionalLight3D lookup pattern. If the scene has neither (a headless
+## test, a minimal scene), this is a harmless no-op — the mechanical effects
+## above (visibility_mult/hunger_mult) work regardless.
+func _apply_weather_visuals() -> void:
+	var we_nodes: Array = get_tree().root.find_children("*", "WorldEnvironment", true, false)
+	if we_nodes.is_empty():
+		return
+	var we: WorldEnvironment = we_nodes[0] as WorldEnvironment
+	if we == null or we.environment == null:
+		return
+	var env := we.environment
+	var sun_nodes: Array = get_tree().root.find_children("*", "DirectionalLight3D", true, false)
+	var sun: DirectionalLight3D = sun_nodes[0] as DirectionalLight3D if not sun_nodes.is_empty() else null
+	match current_weather:
+		Weather.CLEAR:
+			env.fog_enabled = false
+			if sun: sun.light_energy = 1.0
+		Weather.RAIN:
+			env.fog_enabled = true
+			env.fog_light_color = Color(0.55, 0.58, 0.62)
+			env.fog_density = 0.008
+			if sun: sun.light_energy = 0.75
+		Weather.STORM:
+			env.fog_enabled = true
+			env.fog_light_color = Color(0.30, 0.32, 0.36)
+			env.fog_density = 0.02
+			if sun: sun.light_energy = 0.45
+		Weather.FOG:
+			env.fog_enabled = true
+			env.fog_light_color = Color(0.75, 0.75, 0.75)
+			env.fog_density = 0.05
+			if sun: sun.light_energy = 0.85
 
 const BuildPieceScript = preload("res://build_piece.gd")
 
@@ -996,6 +1147,11 @@ func _build_camp_visuals(camp: Node3D) -> void:
 # ─────────────────────────────────────────────────────────────────────────────
 func on_fortress_built() -> void:
 	fortress_built = true
+	fortress_tier += 1
+	if fortress_tier < MAX_FORTRESS_TIER:
+		notify_cat(CAT_TRIBE, "The tribe's fortress has grown -- tier %d now stands." % fortress_tier)
+	else:
+		notify_cat(CAT_TRIBE, "The tribe's fortress has reached its full might.")
 
 func suggest_job(_member) -> String:
 	var have_bushes  := not get_tree().get_nodes_in_group("food_source").is_empty()
@@ -1004,13 +1160,25 @@ func suggest_job(_member) -> String:
 
 	if food < members.size() * 2 and have_bushes:
 		return "gather"
-	# the tribe raises its own fortress once, same as rival camps do
+	# the tribe keeps raising bigger fortresses, same as rival camps do
 	# autonomously (world_tribe.gd._build_palisade) — previously this only
-	# ever happened if the player manually ordered [5] build; nobody built
-	# anything on their own. fortress_built (set once a solo run finishes
-	# the whole plan, see tribemember.gd) stops this from re-triggering
-	# forever once it's up.
-	if not fortress_built and wood >= 30 and members.size() >= 3 and randf() < 0.12:
+	# ever happened ONCE (fortress_built was a one-shot flag that stopped
+	# "build" from ever being suggested again). fortress_tier replaces that
+	# dead end: on_fortress_built() increments it each time a ring finishes,
+	# fence_ring_plan() scales the whole plan up with it, and this gate keeps
+	# proposing "build" (up to MAX_FORTRESS_TIER) with steeper wood/member
+	# requirements each time -- a bigger fortress genuinely needs a bigger
+	# tribe and more lumber, not just a bigger number on a flag.
+	# ONE self-assigned builder at a time. A self-triggered build calls
+	# begin_build() with the default offset=0/stride=1, so EVERY member who
+	# picks "build" independently builds the WHOLE ring from segment 0 -- they
+	# all converge on the same spots, stack blocks on one another, and jam. A
+	# whole-tribe RALLY build is different (it hands each member a distinct
+	# offset/stride slice); that path is untouched. This only gates the
+	# uncoordinated solo case, which is the pile-up you saw.
+	if fortress_tier < MAX_FORTRESS_TIER and not _someone_building() \
+			and wood >= 30 + fortress_tier * 20 \
+			and members.size() >= 3 + fortress_tier and randf() < 0.12:
 		return "build"
 	if clubs_available() < 1:
 		# used to unconditionally suggest "carve" here even with zero wood —
@@ -1286,6 +1454,8 @@ func _process(delta: float) -> void:
 	_respawn_tick(delta)
 	_neutral_tick(delta)
 	_ecology_tick(delta)
+	_material_upgrade_tick(delta)
+	_weather_tick(delta)
 	_war_tick(delta)
 	_check_victory()
 
@@ -1968,13 +2138,33 @@ func assigned_perimeter_point(member) -> Vector3:
 # (radians of angular clearance to either side of a gate angle)
 const GATE_HALF_WIDTH := 0.5
 
-func _near_gate(ang: float, gate_angles: Array) -> bool:
+# BUG FIX (2026-07-22): fence_ring_plan() started scaling gate_count up with
+# fortress tier (more gates for a bigger fortress), but _near_gate() used a
+# FIXED angular half-width regardless of how many gates there were. With
+# GATE_HALF_WIDTH=0.5 rad, each gate already eats 1.0 rad of the ring; at
+# gate_count=6 that's 6.0 of the ring's 6.283 total radians -- nearly the
+# ENTIRE wall was "near a gate", so the wall itself nearly disappeared and
+# a bigger-tier fortress ended up with FEWER real wall segments than a
+# smaller one. half_width now scales so total gate coverage stays roughly
+# constant regardless of gate_count (more, but each one narrower), which is
+# what actually lets the wall grow monotonically with tier.
+func _near_gate(ang: float, gate_angles: Array, half_width: float = GATE_HALF_WIDTH) -> bool:
 	for ga in gate_angles:
-		if absf(wrapf(ang - ga, -PI, PI)) <= GATE_HALF_WIDTH:
+		if absf(wrapf(ang - ga, -PI, PI)) <= half_width:
 			return true
 	return false
 
-func fence_ring_plan() -> Array:
+# EXPANSION (2026-07-22): `tier` picks which ring gets planned -- defaulting
+# to the tribe's CURRENT fortress_tier, i.e. "the next ring to build" (tier 0
+# the first time, tier 1 after on_fortress_built() has fired once, etc).
+# Every dimension scales up with it: a bigger radius, more gates, more
+# teepees -- a real bigger-and-better fortress each time, not the same plan
+# rebuilt on top of itself.
+func fence_ring_plan(tier: int = -1) -> Array:
+	var t: int = tier if tier >= 0 else fortress_tier
+	var radius: float = FORTRESS_BASE_RADIUS + float(t) * FORTRESS_RADIUS_GROWTH
+	var fence_radius: float = radius - 3.0
+
 	var fence_segs: Array = []
 	var teepee_segs: Array = []
 
@@ -1983,30 +2173,37 @@ func fence_ring_plan() -> Array:
 	# real corridor. Previously each ring picked gaps by segment INDEX with
 	# a different segment count per ring, so a gap in the fence usually had
 	# no matching gap in the block wall beyond it — no actual way in.
-	var gate_count := 3
+	var gate_count := mini(3 + t, 6)
 	var gate_angles: Array = []
 	for g in range(gate_count):
 		gate_angles.append(TAU * float(g) / float(gate_count))
+	# keep TOTAL gate coverage roughly constant regardless of gate_count (see
+	# _near_gate()'s own comment) -- more gates on a bigger fortress, each one
+	# narrower, instead of the wall itself disappearing as gates multiply.
+	var gate_half_width: float = GATE_HALF_WIDTH * 3.0 / float(gate_count)
 
-	var count  := 18
+	# more segments for a bigger ring, so the fence posts stay evenly spaced
+	# instead of stretching thinner and thinner as radius grows.
+	var count: int = maxi(18, int(round(18.0 * radius / FORTRESS_BASE_RADIUS)))
 	for i in range(count):
 		var ang := TAU * float(i) / float(count)
-		if _near_gate(ang, gate_angles): continue
-		fence_segs.append({"kind": "fence", "pos": Vector3(cos(ang) * 7.0, 0.0, sin(ang) * 7.0), "yaw": ang + PI * 0.5})
+		if _near_gate(ang, gate_angles, gate_half_width): continue
+		fence_segs.append({"kind": "fence", "pos": Vector3(cos(ang) * fence_radius, 0.0, sin(ang) * fence_radius), "yaw": ang + PI * 0.5})
 	# DOORS (2026-07-21): a gate used to just be a bare gap where the fence
 	# ring skipped a segment -- an unguarded hole, not an actual gate. A real
 	# door piece now fills each one, oriented the same way a fence segment at
 	# that angle would be (yaw = ang + PI/2, tangent to the ring).
 	for ga in gate_angles:
-		var gx := cos(float(ga)) * 7.0
-		var gz := sin(float(ga)) * 7.0
+		var gx := cos(float(ga)) * fence_radius
+		var gz := sin(float(ga)) * fence_radius
 		fence_segs.append({"kind": "door", "pos": Vector3(gx, 1.0, gz), "yaw": float(ga) + PI * 0.5})
-	# a ring of teepees just inside the fence line — homes for the camp
-	var teepee_count := 8
+	# a ring of teepees just inside the fence line — homes for the camp,
+	# growing with the tribe's own expansion (more tiers, more households)
+	var teepee_count := 8 + t * 4
 	for i in range(teepee_count):
 		var ang2 := TAU * float(i) / float(teepee_count) + (TAU / float(teepee_count) * 0.5)
-		teepee_segs.append({"kind": "teepee", "pos": Vector3(cos(ang2) * 4.0, 0.0, sin(ang2) * 4.0), "yaw": 0.0})
-	var block_segs: Array = _fortress_block_segments(10.0, gate_angles)
+		teepee_segs.append({"kind": "teepee", "pos": Vector3(cos(ang2) * (fence_radius - 3.0), 0.0, sin(ang2) * (fence_radius - 3.0)), "yaw": 0.0})
+	var block_segs: Array = _fortress_block_segments(radius, gate_angles, gate_half_width)
 
 	# interleave instead of append-in-order — blocks were dead last in the
 	# plan, so with a single builder and a finite work timer, the fence ring
@@ -2032,7 +2229,8 @@ func fence_ring_plan() -> Array:
 # straight-edged square castle. gate_angles must match whatever ring this
 # wall surrounds (fence_ring_plan passes the same angles used for the fence
 # ring) so the openings actually align between rings.
-func _fortress_block_segments(radius: float, gate_angles: Array) -> Array:
+func _fortress_block_segments(radius: float, gate_angles: Array,
+		gate_half_width: float = GATE_HALF_WIDTH) -> Array:
 	var segs: Array = []
 	var size: float = BlockScript.SIZE
 	var n: int = maxi(2, int(round(radius / size)))
@@ -2042,7 +2240,7 @@ func _fortress_block_segments(radius: float, gate_angles: Array) -> Array:
 				continue   # interior cell — only the perimeter is a wall
 			var x := float(gx) * size
 			var z := float(gz) * size
-			if _near_gate(atan2(z, x), gate_angles): continue
+			if _near_gate(atan2(z, x), gate_angles, gate_half_width): continue
 			segs.append({"kind": "block", "pos": Vector3(x, 1.0, z)})
 			segs.append({"kind": "block", "pos": Vector3(x, 3.0, z)})
 			# THIRD COURSE (2026-07-19): a two-course wall sits chest-high on

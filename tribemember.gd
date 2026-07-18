@@ -259,6 +259,17 @@ const HEARING_RADIUS := 24.0
 const SENSE_INTERVAL := 1.5      # seconds; environment doesn't need 10Hz precision
 var _sense_cd: float = 0.0
 
+## SIGHT_RADIUS scaled by the current weather's visibility (see
+## Tribemanager.visibility_mult() — 1.0 in clear weather, lower in rain/
+## storm/fog). Every vision-gated check in this file (task-target pickers,
+## sees_raider/sees_prey) reads this instead of the bare constant, so bad
+## weather genuinely narrows what a member notices, not just what a
+## notification says.
+func _effective_sight() -> float:
+	if manager and manager.has_method("visibility_mult"):
+		return SIGHT_RADIUS * manager.visibility_mult()
+	return SIGHT_RADIUS
+
 # ── vision-gated work + progressive outward search (2026-07-20) ───────────
 # Task targets are now restricted to SIGHT_RADIUS (see the _nearest_*()
 # pickers) -- a member should work what's actually in front of them, not
@@ -717,20 +728,21 @@ func _sense_environment() -> void:
 	# same as a person doesn't form a new memory every second they keep
 	# looking at the same thing. Coalescing (see TribeMemory.remember())
 	# still folds repeated sightings within its window into one entry.
+	var sight := _effective_sight()
 	var was_seeing_raider := sees_raider
-	var raider_d := _nearest_distance("npc", SIGHT_RADIUS, true)
+	var raider_d := _nearest_distance("npc", sight, true)
 	sees_raider = raider_d >= 0.0
 	if sees_raider:
-		brain.stimulate("SawRaider", _proximity_drive(raider_d, SIGHT_RADIUS))
+		brain.stimulate("SawRaider", _proximity_drive(raider_d, sight))
 		if not was_seeing_raider:
 			TribeMemory.remember(member_name, "saw_raider", "You",
 				"I spotted a rival tribesperson nearby.", "wary", 0.0)
 
 	var was_seeing_prey := sees_prey
-	var prey_d := _nearest_distance("animal", SIGHT_RADIUS, false)
+	var prey_d := _nearest_distance("animal", sight, false)
 	sees_prey = prey_d >= 0.0
 	if sees_prey:
-		brain.stimulate("SawPrey", _proximity_drive(prey_d, SIGHT_RADIUS))
+		brain.stimulate("SawPrey", _proximity_drive(prey_d, sight))
 		if not was_seeing_prey:
 			TribeMemory.remember(member_name, "saw_prey", "You",
 				"I spotted game nearby -- good hunting grounds.", "neutral", 0.0)
@@ -1386,7 +1398,10 @@ func _begin_carve() -> void:
 # ── eat from personal rations first; trusted members can then draw on the
 # shared stockpile; starve only if truly nothing is available anywhere ──
 func _hunger_step(delta: float) -> void:
-	hunger = minf(100.0, hunger + delta * HUNGER_RATE)
+	# WEATHER (2026-07-22): a storm is cold and miserable, not free -- see
+	# Tribemanager.hunger_mult() (1.0 in clear/fog, higher in rain/storm).
+	var weather_mult: float = manager.hunger_mult() if (manager and manager.has_method("hunger_mult")) else 1.0
+	hunger = minf(100.0, hunger + delta * HUNGER_RATE * weather_mult)
 	if hunger >= EAT_AT and inv_food > 0:
 		inv_food -= 1
 		hunger = maxf(0.0, hunger - EAT_RESTORE)
@@ -1935,7 +1950,7 @@ func _nearest_food_source() -> Node3D:
 		if n and is_instance_valid(n) and n.has_method("harvest") and float(n.amount) >= 1.0 \
 				and not _is_claimed(n):
 			var d := global_position.distance_to(n.global_position)
-			if d <= SIGHT_RADIUS and d < bd:
+			if d <= _effective_sight() and d < bd:
 				bd = d
 				best = n
 	return best
@@ -1947,7 +1962,7 @@ func _nearest_animal() -> Node3D:
 		var n := a as Node3D
 		if n and is_instance_valid(n) and not _is_claimed(n):
 			var d := global_position.distance_to(n.global_position)
-			if d <= SIGHT_RADIUS and d < bd:
+			if d <= _effective_sight() and d < bd:
 				bd = d
 				best = n
 	return best
@@ -1959,7 +1974,7 @@ func _nearest_neutral() -> Node3D:
 		var nn := n as Node3D
 		if nn and is_instance_valid(nn) and not _is_claimed(nn):
 			var d := global_position.distance_to(nn.global_position)
-			if d <= SIGHT_RADIUS and d < bd:
+			if d <= _effective_sight() and d < bd:
 				bd = d
 				best = nn
 	return best
@@ -1992,7 +2007,7 @@ func _nearest_tree() -> Node3D:
 		var n := t as Node3D
 		if n and is_instance_valid(n) and n.has_method("chop") and not _is_claimed(n):
 			var d := global_position.distance_to(n.global_position)
-			if d <= SIGHT_RADIUS and d < bd:
+			if d <= _effective_sight() and d < bd:
 				bd = d
 				best = n
 	return best
