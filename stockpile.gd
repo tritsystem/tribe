@@ -10,6 +10,10 @@ var _pile: MeshInstance3D = null
 var _clubs_rack: MeshInstance3D = null
 var _label: Label3D = null
 var hp: float = 100.0
+# CITIES (2026-07-29): the home stockpile leaves this blank -- only OUTPOST
+# stockpiles (Tribemanager.found_outpost()) are actual named settlements,
+# distinct enough from "your one camp" to deserve an identity of their own.
+var settlement_name: String = ""
 
 func _ready() -> void:
 	add_to_group("stockpile")
@@ -92,4 +96,5 @@ func _process(_delta: float) -> void:
 		_clubs_rack.visible = clbs > 0
 		_clubs_rack.scale = Vector3(1.0, 1.0, clampf(float(clbs) / 4.0, 0.3, 2.5))
 	if _label:
-		_label.text = "STOCKPILE\nFood %d · Skins %d · Clubs %d · Wood %d" % [food, skins, clbs, wd]
+		var header: String = settlement_name if settlement_name != "" else "STOCKPILE"
+		_label.text = "%s\nFood %d · Skins %d · Clubs %d · Wood %d" % [header, food, skins, clbs, wd]

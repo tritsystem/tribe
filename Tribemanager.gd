@@ -549,22 +549,50 @@ func _spawn_stockpile() -> void:
 const OUTPOST_MIN_SPACING := 100.0
 var outposts: Array = []
 
+# CITIES (2026-07-29): the first real step past "a stockpile marker" toward
+# an actual named settlement -- a real name (so the clan's expansion reads
+# as founding a PLACE, not just planting an economy prop) and a couple of
+# teepees actually standing there, so it looks like somewhere people live.
+# Built directly here rather than through try_build_teepee(): that function
+# both build-range-gates against the HOME stockpile (which an outpost, by
+# definition, is 100m+ away from -- it would always reject) and tracks the
+# piece for fortress-ring cleanup, which is wrong for a structure that
+# belongs to a separate settlement, not the home ring (see
+# _clear_fortress_ring()'s own comment -- it clears ALL tracked pieces on
+# a tier change, home ring or not).
+const SETTLEMENT_PREFIXES := ["North", "South", "East", "West", "Far", "New", "Little", "Great"]
+const SETTLEMENT_SUFFIXES := ["Hollow", "Reach", "Landing", "Hearth", "Rest", "Watch", "Bend", "Crossing"]
+
+func _generate_settlement_name() -> String:
+	var pre: String = SETTLEMENT_PREFIXES[randi() % SETTLEMENT_PREFIXES.size()]
+	var suf: String = SETTLEMENT_SUFFIXES[randi() % SETTLEMENT_SUFFIXES.size()]
+	return "%s %s" % [pre, suf]
+
 func found_outpost(pos: Vector3) -> bool:
 	for grp in ["stockpile", "outpost_stockpile"]:
 		for s in get_tree().get_nodes_in_group(grp):
 			var sn := s as Node3D
 			if sn and is_instance_valid(sn) and sn.global_position.distance_to(pos) < OUTPOST_MIN_SPACING:
 				return false
+	var settlement_name: String = _generate_settlement_name()
 	var sp := Node3D.new()
 	sp.name = "OutpostStockpile"
 	sp.set_script(load("res://stockpile.gd"))
 	add_child(sp)
 	sp.global_position = pos
 	sp.set("manager", self)
+	sp.set("settlement_name", settlement_name)
 	sp.remove_from_group("stockpile")
 	sp.add_to_group("outpost_stockpile")
 	outposts.append(sp)
-	notify_cat("tribe", "The clan has expanded -- a new stockpile rises far from camp.")
+	for i in range(2):
+		var ang := TAU * float(i) / 2.0 + randf() * 0.5
+		var hut_pos: Vector3 = pos + Vector3(cos(ang) * 3.0, 0.0, sin(ang) * 3.0)
+		var hut := StaticBody3D.new()
+		hut.set_script(load("res://teepee.gd"))
+		add_child(hut)
+		hut.global_position = Vector3(hut_pos.x, ground_y(hut_pos.x, hut_pos.z) + 2.5, hut_pos.z)
+	notify_cat("tribe", "The clan has founded %s -- a new settlement far from camp." % settlement_name)
 	return true
 
 func _spawn_world() -> void:
