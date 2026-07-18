@@ -1095,6 +1095,22 @@ func contribute(kind: String) -> void:
 			if trust_label:
 				trust_label.modulate = Color(1.0, 0.5, 0.3)
 			return
+	# DE-ESCALATE: if this member is currently fighting the PLAYER specifically
+	# (self-defense from take_hit() after being struck), being fed by that same
+	# person is a real appeasement act -- clear the standoff instead of letting
+	# it grind on. BUG FIXED (2026-07-17): _foe only ever cleared on death,
+	# moving >16m away, or the chase-giveup timer expiring -- but feeding
+	# requires standing close enough to feed, which is also close enough to
+	# keep landing strikes, and every successful strike RESETS that same
+	# timer (_chase_timer = CHASE_GIVEUP_TIME in the combat loop). Caught
+	# live: a struck member kept attacking indefinitely even while being fed,
+	# because the two systems never talked to each other -- feeding had no
+	# way to interrupt combat state at all.
+	if _foe != null and is_instance_valid(_foe) and _foe.is_in_group("player"):
+		_foe = null
+		_flee_from = null
+		_flee_timer = 0.0
+		_chase_timer = 0.0
 	match kind:
 		"food":   brain.stimulate("SawContribute", 80.0)
 		"clear":  brain.stimulate("SawHelpClear", 80.0)
