@@ -156,6 +156,28 @@ func _ready() -> void:
 	_rt(C, "let's go raiding!",                   "chorus")
 	_rt(C, "everyone go hunting",                 "order")     # bare imperative, not a cry
 
+	# "investigate" had no verb mapping at all -- "can you investigate?" fell
+	# through to conversation instead of dispatching a scout order. Added as a
+	# scout synonym in VERBS AND in IMPERATIVE_STARTS (parse() needs both: one
+	# gates whether this counts as an imperative at all, the other maps it to
+	# a real order kind). Surfaced a second, more general bug while fixing it:
+	# every IMPERATIVE_STARTS entry has a trailing space (built for "verb +
+	# object" phrasing like "go get berries"), so a BARE single-word command
+	# with nothing following -- exactly what "can you investigate?" strips
+	# down to -- could never match. Fixed for every verb in the list, not just
+	# this one, by padding the compared string with a trailing space.
+	print("\n=== ROUTE: 'investigate' as a scout synonym ===")
+	_ck(C, "Ka, investigate the noise",           "order", "scout", "Ka")
+	_ck(C, "investigate the noise",               "order", "scout", "-")
+	# the bare single-word case that exposed the trailing-space bug
+	_ck(C, "can you investigate",                 "order", "scout", "-")
+	_ck(C, "can you investigate?",                "order", "scout", "-")
+	_ck(C, "investigate",                         "order", "scout", "-")
+	# and existing bare single-word imperatives must keep working too --
+	# nothing regressed by the trailing-space fix
+	_ck(C, "come",                                "order", "come",  "-")
+	_ck(C, "scout",                               "order", "scout", "-")
+
 	# "here" = WHERE, "around me" = WHO. These two sentences read almost the same
 	# and mean different things; nearby=true on a summons silently shrinks it to
 	# people already standing next to you.
