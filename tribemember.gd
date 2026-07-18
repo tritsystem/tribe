@@ -1845,12 +1845,31 @@ func _do_catch() -> void:
 		_task_mats += int(loot.get("skins", 0))
 		_task_result = "%s: %d meat, %d skins" % [loot.get("name", "game"), int(loot.get("food", 0)), int(loot.get("skins", 0))]
 
+## Is `n` already someone ELSE's active work target? Previously every
+## _nearest_*() picker chose the globally nearest candidate with no regard
+## for whether another member had already claimed it -- two gatherers would
+## dogpile the same bush, two hunters chase the same animal, two woodcutters
+## queue up on the same tree, two recruiters walk up to the same wanderer.
+## Members already expose _target_node externally (see how _maybe_share_food
+## reads "hunger"/"inv_food" the same way), so this needs no new shared
+## state -- just a live check against the roster before committing to a node.
+func _is_claimed(n: Node3D) -> bool:
+	for o in get_tree().get_nodes_in_group("tribe"):
+		if o == self or not is_instance_valid(o):
+			continue
+		if not ("member_name" in o):
+			continue   # not a real tribemember (e.g. a dog) -- can't claim a work node
+		if o.get("_target_node") == n:
+			return true
+	return false
+
 func _nearest_food_source() -> Node3D:
 	var best: Node3D = null
 	var bd := INF
 	for b in get_tree().get_nodes_in_group("food_source"):
 		var n := b as Node3D
-		if n and is_instance_valid(n) and n.has_method("harvest") and float(n.amount) >= 1.0:
+		if n and is_instance_valid(n) and n.has_method("harvest") and float(n.amount) >= 1.0 \
+				and not _is_claimed(n):
 			var d := global_position.distance_to(n.global_position)
 			if d < bd:
 				bd = d
@@ -1862,7 +1881,7 @@ func _nearest_animal() -> Node3D:
 	var bd := INF
 	for a in get_tree().get_nodes_in_group("animal"):
 		var n := a as Node3D
-		if n and is_instance_valid(n):
+		if n and is_instance_valid(n) and not _is_claimed(n):
 			var d := global_position.distance_to(n.global_position)
 			if d < bd:
 				bd = d
@@ -1874,7 +1893,7 @@ func _nearest_neutral() -> Node3D:
 	var bd := INF
 	for n in get_tree().get_nodes_in_group("neutral"):
 		var nn := n as Node3D
-		if nn and is_instance_valid(nn):
+		if nn and is_instance_valid(nn) and not _is_claimed(nn):
 			var d := global_position.distance_to(nn.global_position)
 			if d < bd:
 				bd = d
@@ -1907,7 +1926,7 @@ func _nearest_tree() -> Node3D:
 	var bd := INF
 	for t in get_tree().get_nodes_in_group("tree"):
 		var n := t as Node3D
-		if n and is_instance_valid(n) and n.has_method("chop"):
+		if n and is_instance_valid(n) and n.has_method("chop") and not _is_claimed(n):
 			var d := global_position.distance_to(n.global_position)
 			if d < bd:
 				bd = d

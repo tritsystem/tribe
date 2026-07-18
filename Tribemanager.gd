@@ -1854,7 +1854,7 @@ func fence_ring_plan() -> Array:
 		if _near_gate(ang, gate_angles): continue
 		fence_segs.append({"kind": "fence", "pos": Vector3(cos(ang) * 7.0, 0.0, sin(ang) * 7.0), "yaw": ang + PI * 0.5})
 	# a ring of teepees just inside the fence line — homes for the camp
-	var teepee_count := 4
+	var teepee_count := 8
 	for i in range(teepee_count):
 		var ang2 := TAU * float(i) / float(teepee_count) + (TAU / float(teepee_count) * 0.5)
 		teepee_segs.append({"kind": "teepee", "pos": Vector3(cos(ang2) * 4.0, 0.0, sin(ang2) * 4.0), "yaw": 0.0})
@@ -1897,6 +1897,24 @@ func _fortress_block_segments(radius: float, gate_angles: Array) -> Array:
 			if _near_gate(atan2(z, x), gate_angles): continue
 			segs.append({"kind": "block", "pos": Vector3(x, 1.0, z)})
 			segs.append({"kind": "block", "pos": Vector3(x, 3.0, z)})
+			# THIRD COURSE (2026-07-19): a two-course wall sits chest-high on
+			# an NPC -- close enough to read as a fence, not a fortress. One
+			# more course per perimeter cell (same placement loop, same
+			# per-segment cost) makes the wall itself read as a real
+			# defensive structure from outside camp, not just up close.
+			segs.append({"kind": "block", "pos": Vector3(x, 5.0, z)})
+	# CORNER WATCHTOWERS (2026-07-19): four freestanding stacks at the
+	# diagonals, one course taller than the wall itself, so they read as
+	# towers rather than a slightly-taller stretch of wall. Placed just
+	# outside the wall ring (radius + size) so a tower column never lands
+	# on a cell the perimeter loop above already claimed.
+	var tower_r := radius + size
+	for i in range(4):
+		var ang := PI * 0.25 + TAU * float(i) / 4.0
+		var tx := cos(ang) * tower_r
+		var tz := sin(ang) * tower_r
+		for course in range(4):
+			segs.append({"kind": "block", "pos": Vector3(tx, 1.0 + course * 2.0, tz)})
 	return segs
 
 # ═════════════════════════════════════════════════════════════════════════════
