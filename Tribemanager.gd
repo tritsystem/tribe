@@ -133,7 +133,7 @@ var _raid: Dictionary = {}
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
-const STANDING_QUOTA := {"gather": 50, "wood": 10, "hunt": 20, "scout": 3, "recruit": 1}
+const STANDING_QUOTA := {"gather": 50, "wood": 10, "hunt": 20, "scout": 3, "recruit": 1, "guard": 1}
 const SCOUT_RANGE    := 30.0
 const CAMP_COST      := 15
 const FENCE_COST     := 2

@@ -89,7 +89,23 @@ const ORDER_BASE := 70                                                        # 
 # come when you call, a Greedy one (-5 -> 80) just barely will, and everyone
 # Steady or better does. Being ignored by someone who doesn't trust you yet is
 # the loyalty system doing its job, not the order failing.
-const ORDER_RISK := {"come": 80, "gather": 100, "hunt": 130, "scout": 165, "wood": 100}
+# BUG FIXED (2026-07-17): "recruit" and "guard" were real order kinds
+# ([6]/[7], see FPSPlayer.gd) but were never added here, despite this exact
+# comment block warning that anything missing is refused 100% of the time.
+# Every recruit/guard order -- player-issued AND the autonomous self-directed
+# kind (the gather-then-retry-recruit call in _complete_task()) --
+# silently failed no matter how loyal the member was, because drive (at most
+# ~70+125+40=235 for a maximally loyal, brave member) can never beat the
+# default 999. Caught live: "commands 5 6 7 0 don't work" -- 6 and 7 were
+# genuinely broken; 5 (build) and 0 (auto) bypass ORDER_RISK entirely (route
+# through begin_build()/clear_standing() directly) and traced clean.
+# recruit=110: a bit more socially involved than plain gather (approaching an
+# unknown wanderer) but not physically dangerous, so priced close to gather.
+# guard=140: stationed defense duty draws real raider attention (that's the
+# point of a guard post), priced a notch above hunt but well under scout's
+# solo-in-hostile-territory risk.
+const ORDER_RISK := {"come": 80, "gather": 100, "hunt": 130, "scout": 165, "wood": 100,
+	"recruit": 110, "guard": 140}
 
 # ── brain LOD: skip Spikeling ticks for members beyond this distance ──
 const BRAIN_LOD_RADIUS := 80.0
