@@ -1125,27 +1125,33 @@ func _check_stuck(delta: float) -> void:
 		_break_free()
 
 func _break_free() -> void:
-	# trapped on a fence, a built block wall, or a TREE. Bash destructibles
-	# (fence/block) — teepees are walk-through (see teepee.gd). Trees can't be
-	# bashed, so the only way past is to route AROUND them, which the random
-	# sideways shove failed at (it often just re-charged the same trunk).
+	# PERF/CORRECTNESS FIX (2026-07-27): this used to scan the FULL "fence",
+	# "block", AND "tree" groups (unbounded, whole-world) every time ANY
+	# member got stuck -- tree_count alone can be 1000-2600 at Skirmish/Epic
+	# scale, and this session's own fortress-tier work (a 3rd wall course +
+	# four watchtowers) made "block" substantially bigger too. But NONE of
+	# those three groups can EVER be the real physical cause of a member
+	# being stuck: fence/block (and every build_piece: stair/roof/door/
+	# small) sit on collision layer 8, which a tribemember's default
+	# collision mask doesn't intersect at all -- "Walls are now on collision
+	# layer 4 which AI doesn't mask... members phase through them" (see
+	# block.gd's own comment, which already said "this recovery is only for
+	# terrain steps / each other now" -- the expensive scan just never
+	# actually got removed to match). Trees have NO collision shape at all
+	# (see tree.gd). Replaced with a bounded SpatialGrid query against
+	# "tribe" -- other members ARE real, same-layer colliders, already
+	# indexed there for exactly this kind of proximity check, and are the
+	# one group that can genuinely be the cause.
 	var obstacle: Node3D = null
 	var od := 2.2
-	for grp in ["fence", "block", "tree"]:
-		for f in get_tree().get_nodes_in_group(grp):
-			var fn := f as Node3D
-			if fn == null or not is_instance_valid(fn):
-				continue
-			var d := global_position.distance_to(fn.global_position)
-			# NO LONGER bash fences/blocks to escape -- members were destroying
-			# their OWN tribe's fortress to get unstuck. Walls are now on collision
-			# layer 4 which AI doesn't mask (block.gd), so members phase through
-			# them and never wedge on one; this recovery is only for terrain steps
-			# / each other now. (Kept the loop to find the nearest obstacle to
-			# shove away from, just without the destructive take_damage.)
-			if d < od:
-				od = d
-				obstacle = fn
+	for o in SpatialGrid.query(global_position, od, "tribe"):
+		var fn := o as Node3D
+		if fn == null or fn == self or not is_instance_valid(fn):
+			continue
+		var d := global_position.distance_to(fn.global_position)
+		if d < od:
+			od = d
+			obstacle = fn
 	# push directly AWAY from the nearest obstacle (reliable) plus a
 	# perpendicular slide, so we round it instead of grinding into it again.
 	var away := Vector3(randf() - 0.5, 0.0, randf() - 0.5)
