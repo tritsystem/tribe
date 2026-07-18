@@ -257,6 +257,23 @@ func _say_to(member: Node, text: String, delay: float) -> void:
 		if not is_instance_valid(member):
 			return
 
+	# DIRECT REQUEST FOR A POEM/SONG (2026-07-23): previously EVERY player line,
+	# including "tell me a poem", went through the generic say_as() reply path
+	# -- whose own prompt hard-caps replies at "ONE short spoken line (max 20
+	# words)". Caught live: asking Bo for a poem got a single sentence
+	# ACKNOWLEDGING the request ("I'll share a simple poem...") instead of an
+	# actual poem, because say_as() structurally can't produce verse. A real
+	# request now routes to TribeLLM.compose_as() instead -- the same
+	# multi-line-capable call TribePoetry's own autonomous composition uses,
+	# grounded the same way (real memory + this member's actual sensed
+	# situation, not a blank prompt).
+	if _looks_like_poem_request(text):
+		var form: String = TribePoetry.pick_form(randf())
+		TribeLLM.compose_as(npc_name, _flavour(str(member.get("personality"))),
+			TribeMemory.context_for(npc_name, "You"), TribePoetry.situation_for(member),
+			form, TribePoetry.fallback_verse(member, form), "player_poem")
+		return
+
 	var brain_text: String = str(member.call("brain_snapshot")) if member.has_method("brain_snapshot") else ""
 	var persona: String = "%s Your standing with the leader is '%s'. %s" % [
 		_flavour(str(member.get("personality"))), str(member.get("current_rank")), brain_text]
@@ -295,6 +312,19 @@ func _say_to(member: Node, text: String, delay: float) -> void:
 		TribeMemory.context_for(npc_name, "You"),
 		"Your leader just said to you: \"%s\".%s Answer them directly.%s" % [text, continuity, guard],
 		_fallback(str(member.get("personality"))), "player", TribeTalk.roster_string())
+
+## Is the player directly asking for a poem/song, rather than just talking?
+## Keyword-based on purpose, same honest simplicity as TribeRumor.classify()
+## -- a real ask ("tell me a poem", "sing me a song", "give me a verse")
+## should route to compose_as(), not the one-line say_as() reply path.
+const POEM_REQUEST_MARKERS := ["poem", "song", "verse", "sing me", "sing us", "rhyme", "ballad"]
+
+func _looks_like_poem_request(text: String) -> bool:
+	var low: String = " " + text.strip_edges().to_lower() + " "
+	for m in POEM_REQUEST_MARKERS:
+		if (" " + m) in low or low.begins_with(m + " "):
+			return true
+	return false
 
 ## Does `text` read as a reference-only continuation of what was just said,
 ## rather than a fresh new thought? Known follow-up phrasings, OR anything
@@ -335,6 +365,18 @@ func _fallback(p: String) -> String:
 	return str(f.get(p, "Mm."))
 
 func _on_line(speaker: String, listener: String, text: String, tag: String) -> void:
+	if tag == "player_poem":
+		# a direct poem/song request -- see _looks_like_poem_request(). Shown
+		# and remembered the same way TribePoetry's own autonomous composing
+		# is (a "composed" memory, not "talked"), so a poem asked for by the
+		# leader is indistinguishable, memory-wise, from one written unprompted.
+		_push("[color=#fd7]%s:[/color] %s" % [speaker, text])
+		if _target != null and is_instance_valid(_target) and str(_target.get("member_name")) == speaker:
+			_target.say(text, TribePoetry.HOLD, true)
+		TribeMemory.remember(speaker, "composed", "You",
+			"You asked me for a poem, and I composed: \"%s\"" % text, "warm", 0.02)
+		_last_own_reply[speaker] = {"text": text, "t": Time.get_ticks_msec() / 1000.0}
+		return
 	if tag != "player":        # NPC<->NPC chatter is TribeTalk's business, not ours
 		return
 	_push("[color=#fd7]%s:[/color] %s" % [speaker, text])
