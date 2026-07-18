@@ -575,6 +575,7 @@ func found_outpost(pos: Vector3) -> bool:
 			if sn and is_instance_valid(sn) and sn.global_position.distance_to(pos) < OUTPOST_MIN_SPACING:
 				return false
 	var settlement_name: String = _generate_settlement_name()
+	var district: String = DISTRICT_TYPES[randi() % DISTRICT_TYPES.size()]
 	var sp := Node3D.new()
 	sp.name = "OutpostStockpile"
 	sp.set_script(load("res://stockpile.gd"))
@@ -582,18 +583,64 @@ func found_outpost(pos: Vector3) -> bool:
 	sp.global_position = pos
 	sp.set("manager", self)
 	sp.set("settlement_name", settlement_name)
+	sp.set("district", district)
 	sp.remove_from_group("stockpile")
 	sp.add_to_group("outpost_stockpile")
 	outposts.append(sp)
-	for i in range(2):
-		var ang := TAU * float(i) / 2.0 + randf() * 0.5
+	_build_district_structures(district, pos)
+	notify_cat("tribe", "The clan has founded %s -- a %s settlement far from camp." % [settlement_name, district])
+	return true
+
+## Every settlement's baseline homes plus a real structure distinct to its
+## district, not just a different name. Split out from found_outpost() so
+## the actual construction is directly testable without depending on the
+## random district roll.
+func _build_district_structures(district: String, pos: Vector3) -> void:
+	var teepee_count: int = 3 if district == "Gathering" else 2
+	for i in range(teepee_count):
+		var ang := TAU * float(i) / float(teepee_count) + randf() * 0.3
 		var hut_pos: Vector3 = pos + Vector3(cos(ang) * 3.0, 0.0, sin(ang) * 3.0)
 		var hut := StaticBody3D.new()
 		hut.set_script(load("res://teepee.gd"))
 		add_child(hut)
 		hut.global_position = Vector3(hut_pos.x, ground_y(hut_pos.x, hut_pos.z) + 2.5, hut_pos.z)
-	notify_cat("tribe", "The clan has founded %s -- a new settlement far from camp." % settlement_name)
-	return true
+	match district:
+		"Watch":
+			# a genuine lookout tower -- real height (3 block courses + a
+			# roof cap), matching the mechanical sight bonus below.
+			for course in range(3):
+				var b := StaticBody3D.new()
+				b.set_script(load("res://block.gd"))
+				add_child(b)
+				b.global_position = Vector3(pos.x, ground_y(pos.x, pos.z) + 1.0 + float(course) * 2.0, pos.z + 4.0)
+			var roof := StaticBody3D.new()
+			roof.set_script(BuildPieceScript)
+			roof.kind = BuildPieceScript.Kind.ROOF
+			add_child(roof)
+			roof.global_position = Vector3(pos.x, ground_y(pos.x, pos.z) + 1.0 + 3.0 * 2.0, pos.z + 4.0)
+		"Crafting":
+			# a workshop marker -- a single worked block, distinct from the
+			# raw wall material a fortress course uses.
+			var workshop := StaticBody3D.new()
+			workshop.set_script(load("res://block.gd"))
+			workshop.material_tier = maxi(1, material_tier)
+			add_child(workshop)
+			workshop.global_position = Vector3(pos.x + 4.0, ground_y(pos.x + 4.0, pos.z) + 1.0, pos.z)
+		"Gathering":
+			pass   # the extra teepee above IS gathering's own distinct structure
+
+const DISTRICT_TYPES := ["Watch", "Gathering", "Crafting"]
+const WATCH_SIGHT_BONUS := 1.3   # a lookout tower genuinely extends how far residents see
+
+## Real mechanical payoff for district specialization -- a member living
+## near a "Watch" settlement sees farther, checked the same way weather's
+## visibility_mult() already scales a member's effective sight radius.
+func sight_bonus_at(pos: Vector3) -> float:
+	for o in outposts:
+		if is_instance_valid(o) and str(o.get("district")) == "Watch" \
+				and (o as Node3D).global_position.distance_to(pos) <= RESIDENCE_RADIUS:
+			return WATCH_SIGHT_BONUS
+	return 1.0
 
 # MIGRATION (2026-07-31): so a member can find and join an EXISTING
 # settlement instead of only the founder ever living there. Residency is

@@ -14,6 +14,11 @@ var hp: float = 100.0
 # stockpiles (Tribemanager.found_outpost()) are actual named settlements,
 # distinct enough from "your one camp" to deserve an identity of their own.
 var settlement_name: String = ""
+# DISTRICTS (2026-08-01): which specialty this settlement was founded as
+# ("Watch"/"Gathering"/"Crafting") -- see Tribemanager.found_outpost() for
+# the real structures/mechanical effects tied to each. Blank on the home
+# stockpile, same as settlement_name.
+var district: String = ""
 
 func _ready() -> void:
 	add_to_group("stockpile")
@@ -97,4 +102,6 @@ func _process(_delta: float) -> void:
 		_clubs_rack.scale = Vector3(1.0, 1.0, clampf(float(clbs) / 4.0, 0.3, 2.5))
 	if _label:
 		var header: String = settlement_name if settlement_name != "" else "STOCKPILE"
+		if district != "":
+			header += " (%s)" % district
 		_label.text = "%s\nFood %d · Skins %d · Clubs %d · Wood %d" % [header, food, skins, clbs, wd]

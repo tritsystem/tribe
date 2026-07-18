@@ -266,9 +266,15 @@ var _sense_cd: float = 0.0
 ## weather genuinely narrows what a member notices, not just what a
 ## notification says.
 func _effective_sight() -> float:
+	var mult := 1.0
 	if manager and manager.has_method("visibility_mult"):
-		return SIGHT_RADIUS * manager.visibility_mult()
-	return SIGHT_RADIUS
+		mult *= manager.visibility_mult()
+	# DISTRICTS (2026-08-01): a member living near a "Watch" settlement
+	# genuinely sees farther -- real payoff for the district a settlement
+	# was founded as, not just a different name/structure.
+	if manager and manager.has_method("sight_bonus_at"):
+		mult *= manager.sight_bonus_at(home_pos)
+	return SIGHT_RADIUS * mult
 
 # ── vision-gated work + progressive outward search (2026-07-20) ───────────
 # Task targets are now restricted to SIGHT_RADIUS (see the _nearest_*()
