@@ -1871,10 +1871,17 @@ func _begin_fallback(msg: String) -> void:
 	if _search_streak >= EXPANSION_SEARCH_STREAK and manager and manager.has_method("found_outpost"):
 		if manager.found_outpost(global_position):
 			_search_streak = 0
+			# RESIDENCE (2026-07-31): the founder becomes the settlement's
+			# first real resident, not just its builder -- home_pos is the
+			# actual anchor _wander()/_begin_fallback() center a member's
+			# whole local life on, so re-planting it here means this member
+			# genuinely lives at the new settlement from now on instead of
+			# drifting back toward the original camp once idle.
+			home_pos = global_position
 			TribeMemory.remember(member_name, "founded_outpost", "You",
-				"I'd wandered far enough from camp that I raised a new stockpile right here.",
+				"I'd wandered far enough from camp that I raised a new stockpile right here -- this is home now.",
 				"proud", 0.05)
-			_think("New ground -- a stockpile goes here!", 2.5)
+			_think("New ground -- a stockpile goes here! I'll settle here.", 2.8)
 			return
 	var radius: float = minf(SEARCH_RADIUS_MAX,
 		SEARCH_RADIUS_BASE + float(_search_streak - 1) * SEARCH_RADIUS_GROWTH)
