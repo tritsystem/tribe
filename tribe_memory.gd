@@ -139,13 +139,36 @@ func get_emotional(agent: String, n: int = 3) -> Array:
 ## they're about (gossip, bonds with others, work) -- previously a player
 ## conversation could only ever surface player-directed memories, so an NPC
 ## could never bring up anything else going on in their life.
+##
+## VARIETY (2026-07-17): tracks the memory TYPE (fed/bond/talked/...) cited
+## last call per agent+about pair. If the freshest memory is the SAME type as
+## last time and a different-typed one is available nearby, lead with that
+## instead. This is real recency-correct behavior, not a bug fix -- caught
+## live, a member fed twice mid-conversation correctly led with "you fed me"
+## both times (that WAS the freshest fact each time), but three turns running
+## on the same fact reads as monotonous even when each is individually
+## accurate. Only kicks in when an actual alternative exists; never hides a
+## genuinely repeated event if it's truly the only recent memory.
+var _last_context_type: Dictionary = {}   # "agent:about" -> event_type string
+
 func context_for(agent: String, about: String = "", n: int = 4) -> String:
 	var picks: Array = []
 	if about != "":
 		var about_mem: Array = get_memories_about(agent, about)
 		var recent_about: Array = about_mem.slice(maxi(0, about_mem.size() - n), about_mem.size())
 		recent_about.reverse()   # most recent first -- this is what should dominate
+		var key: String = agent + ":" + about
+		var last_type = _last_context_type.get(key, "")
+		if recent_about.size() > 1 and last_type != "" and recent_about[0]["type"] == last_type:
+			for i in range(1, recent_about.size()):
+				if recent_about[i]["type"] != last_type:
+					var alt = recent_about[i]
+					recent_about.remove_at(i)
+					recent_about.insert(0, alt)
+					break
 		picks.append_array(recent_about.slice(0, mini(n - n / 2, recent_about.size())))
+		if not picks.is_empty():
+			_last_context_type[key] = picks[0]["type"]
 		# fill remaining slots with the member's broader recent/emotional life,
 		# skipping anything already picked so the two halves don't duplicate
 		var picked_summaries: Array = []
