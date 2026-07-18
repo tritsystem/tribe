@@ -168,7 +168,20 @@ func take_hit(dmg: float, _attacker) -> void:
 	screen_shake(0.05 + minf(dmg, 20.0) * 0.004)   # harder hits shake harder
 	if hp <= 0.0:
 		hp = max_hp
-		global_position = Vector3(0, 1, 5)   # beaten back to your own camp
+		# BUG FIXED (2026-07-17): this used to hard-code Vector3(0, 1, 5) --
+		# fine back when the world was a flat plane at y=0, but real terrain
+		# (hills, valleys, islands) means a fixed point can sit well below
+		# the actual generated surface there. Caught live: a player respawned
+		# under the map after dying. Tribemanager.gd's own initial-spawn code
+		# already asks ground_y() where the real surface is at a given x/z
+		# (see _build_terrain()'s "lift the player onto the surface" comment)
+		# -- this path just never got the same treatment.
+		var rx := 0.0
+		var rz := 5.0
+		var ry := 1.0
+		if manager and manager.has_method("ground_y"):
+			ry = manager.ground_y(rx, rz) + 1.0
+		global_position = Vector3(rx, ry, rz)   # beaten back to your own camp
 		velocity = Vector3.ZERO
 		if manager and manager.has_method("notify"):
 			manager.notify("You were driven off and limped back to camp!")
