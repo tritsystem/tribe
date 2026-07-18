@@ -139,6 +139,9 @@ const CAMP_COST      := 15
 const FENCE_COST     := 2
 const TEEPEE_COST    := 6
 const BLOCK_COST      := 1   # cheap — fortresses/mazes need many of these
+const STAIR_COST      := 1   # same grade as a wall block — it's a wall block cut in half
+const ROOF_COST       := 2   # a capping piece; costs a bit more than a plain wall course
+const SMALL_COST      := 1   # fine-detail unit — small, so priced like a stair
 const CLUB_COST      := 4
 const BUILD_RANGE    := 45.0
 var MAP_EXTENT       := 170.0   # scaled per-preset in _apply_scale — Massive needs
@@ -450,6 +453,45 @@ func _spawn_stockpile() -> void:
 	add_child(sp)
 	sp.position = Vector3.ZERO
 	sp.set("manager", self)
+
+# ── CLAN EXPANSION: outpost stockpiles (2026-07-20) ─────────────────────────
+# A member who's genuinely wandered far out (see tribemember.gd's
+# _search_streak / EXPANSION_SEARCH_STREAK) can found a new stockpile right
+# where they're standing -- but only one per OUTPOST_MIN_SPACING radius, so
+# expansion actually spreads the clan across the map instead of clustering a
+# pile of stockpiles on top of each other the moment one member wanders off.
+#
+# HONEST SCOPE: this reuses stockpile.gd's own display, which already just
+# mirrors this SINGLE manager's food/wood/materials/clubs totals (see its
+# _process()) -- there is one tribe economy in this codebase, not a
+# per-camp inventory system. An outpost is a real, distinctly-grouped world
+# object (group "outpost_stockpile", deliberately NOT "stockpile" -- roughly
+# a dozen call sites in this file assume get_first_node_in_group("stockpile")
+# resolves to the ONE home camp, e.g. where raid members return to; adding
+# outposts to that same group would make those sites nondeterministic) that
+# visibly marks the clan's expansion and enforces real geographic spread,
+# without silently faking a multi-economy simulation this codebase doesn't
+# actually have.
+const OUTPOST_MIN_SPACING := 100.0
+var outposts: Array = []
+
+func found_outpost(pos: Vector3) -> bool:
+	for grp in ["stockpile", "outpost_stockpile"]:
+		for s in get_tree().get_nodes_in_group(grp):
+			var sn := s as Node3D
+			if sn and is_instance_valid(sn) and sn.global_position.distance_to(pos) < OUTPOST_MIN_SPACING:
+				return false
+	var sp := Node3D.new()
+	sp.name = "OutpostStockpile"
+	sp.set_script(load("res://stockpile.gd"))
+	add_child(sp)
+	sp.global_position = pos
+	sp.set("manager", self)
+	sp.remove_from_group("stockpile")
+	sp.add_to_group("outpost_stockpile")
+	outposts.append(sp)
+	notify_cat("tribe", "The clan has expanded -- a new stockpile rises far from camp.")
+	return true
 
 func _spawn_world() -> void:
 	_spawn_vegetation()
@@ -789,6 +831,68 @@ func try_build_block(pos: Vector3, by_player: bool = false) -> bool:
 	b.set_script(load("res://block.gd"))
 	add_child(b)
 	b.global_position = BlockScript.snap(pos)
+	return true
+
+const BuildPieceScript = preload("res://build_piece.gd")
+
+# A shallow wedge — climbable half-steps up a wall or watchtower. Same
+# grid-snap + course-height convention as try_build_block() so a staircase
+# actually lines up flush against the wall it's climbing.
+func try_build_stair(pos: Vector3, by_player: bool = false) -> bool:
+	if by_player and not _within_build_range(pos):
+		notify_cat(CAT_YOU, "Too far from camp — stay within %d of the stockpile." % int(BUILD_RANGE))
+		return false
+	if wood < STAIR_COST:
+		notify_cat(CAT_YOU, "Need %d wood for a stair — chop more trees." % STAIR_COST)
+		return false
+	wood -= STAIR_COST
+	var b = StaticBody3D.new()
+	b.set_script(BuildPieceScript)
+	b.kind = BuildPieceScript.Kind.STAIR
+	add_child(b)
+	var seat := seat_build(pos.x, pos.z, 1.4)
+	var snapped: Vector3 = BlockScript.snap(pos)
+	snapped.y = seat + pos.y
+	b.global_position = snapped
+	return true
+
+# A steep triangular-prism cap — reads as an actual roofline, not a flat lid.
+func try_build_roof(pos: Vector3, by_player: bool = false) -> bool:
+	if by_player and not _within_build_range(pos):
+		notify_cat(CAT_YOU, "Too far from camp — stay within %d of the stockpile." % int(BUILD_RANGE))
+		return false
+	if wood < ROOF_COST:
+		notify_cat(CAT_YOU, "Need %d wood for a roof — chop more trees." % ROOF_COST)
+		return false
+	wood -= ROOF_COST
+	var b = StaticBody3D.new()
+	b.set_script(BuildPieceScript)
+	b.kind = BuildPieceScript.Kind.ROOF
+	add_child(b)
+	var seat := seat_build(pos.x, pos.z, 1.4)
+	var snapped: Vector3 = BlockScript.snap(pos)
+	snapped.y = seat + pos.y
+	b.global_position = snapped
+	return true
+
+# A half-size fine-detail unit — corners, ledges, in-fill that shouldn't be
+# forced onto the coarse 2.0-unit wall grid. Deliberately NOT grid-snapped
+# to BlockScript's grid: the whole point is finer placement than that grid
+# allows.
+func try_build_small(pos: Vector3, by_player: bool = false) -> bool:
+	if by_player and not _within_build_range(pos):
+		notify_cat(CAT_YOU, "Too far from camp — stay within %d of the stockpile." % int(BUILD_RANGE))
+		return false
+	if wood < SMALL_COST:
+		notify_cat(CAT_YOU, "Need %d wood for detail work — chop more trees." % SMALL_COST)
+		return false
+	wood -= SMALL_COST
+	var b = StaticBody3D.new()
+	b.set_script(BuildPieceScript)
+	b.kind = BuildPieceScript.Kind.SMALL
+	add_child(b)
+	var seat := seat_build(pos.x, pos.z, 1.0)
+	b.global_position = Vector3(pos.x, seat + pos.y, pos.z)
 	return true
 
 func try_build_camp(pos: Vector3, by_player: bool = false) -> bool:
@@ -1915,6 +2019,22 @@ func _fortress_block_segments(radius: float, gate_angles: Array) -> Array:
 		var tz := sin(ang) * tower_r
 		for course in range(4):
 			segs.append({"kind": "block", "pos": Vector3(tx, 1.0 + course * 2.0, tz)})
+		# STAIR + ROOF (2026-07-20): each tower gets a real approach (a
+		# climbable stair pressed against its inward face, one per course so
+		# the whole climb is walkable) and a genuine roofline capping it,
+		# instead of standing there as a bare stack of cubes. tx*0.85/tz*0.85
+		# hugs the stair against the tower's inward face rather than floating
+		# out in open ground.
+		for course in range(4):
+			segs.append({"kind": "stair", "pos": Vector3(tx * 0.85, 1.0 + course * 2.0, tz * 0.85)})
+		segs.append({"kind": "roof", "pos": Vector3(tx, 1.0 + 4 * 2.0, tz)})
+	# FINE-DETAIL CORNERS (2026-07-20): the smaller building unit gets real
+	# use here -- a half-size piece tucked into each gate's inner corner,
+	# the kind of fine-tuning the coarse 2.0-unit wall grid can't place.
+	for ga in gate_angles:
+		var gx := cos(float(ga)) * (radius - size * 0.5)
+		var gz := sin(float(ga)) * (radius - size * 0.5)
+		segs.append({"kind": "small", "pos": Vector3(gx, 1.0, gz)})
 	return segs
 
 # ═════════════════════════════════════════════════════════════════════════════

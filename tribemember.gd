@@ -259,6 +259,27 @@ const HEARING_RADIUS := 24.0
 const SENSE_INTERVAL := 1.5      # seconds; environment doesn't need 10Hz precision
 var _sense_cd: float = 0.0
 
+# ── vision-gated work + progressive outward search (2026-07-20) ───────────
+# Task targets are now restricted to SIGHT_RADIUS (see the _nearest_*()
+# pickers) -- a member should work what's actually in front of them, not
+# beeline across the map to the globally-nearest node. When nothing
+# qualifying is in sight, _begin_fallback() SEARCHES instead of idling: each
+# consecutive failed search pushes the search point further out from the
+# member's CURRENT position (not back toward home), so a camp that's
+# stripped its immediate surroundings genuinely walks its working range
+# outward over time rather than orbiting the same starting radius forever.
+# _search_streak resets to 0 the instant a real target is found again (see
+# the gather/hunt/wood/recruit branches above) -- it's "how long have I come
+# up empty", not a ratchet that only ever grows.
+const SEARCH_RADIUS_BASE   := 10.0   # first failed search — same as the old fixed fallback
+const SEARCH_RADIUS_GROWTH := 6.0    # extra distance per additional consecutive failure
+const SEARCH_RADIUS_MAX    := 90.0   # cap — still findable/walkable, not an ever-growing trek
+# a member who has searched this many times running (i.e. is genuinely far
+# out, not just unlucky once) is a real candidate to found a new outpost
+# stockpile instead of just wandering — see Tribemanager.found_outpost().
+const EXPANSION_SEARCH_STREAK := 4
+var _search_streak: int = 0
+
 # ── NPC-to-NPC food sharing (2026-07-18) ──────────────────────────────────
 # Previously the only food transfers in this whole game were player->member
 # (contribute()) and member->shared-stockpile (the trust-gated self-feeding
@@ -1286,6 +1307,12 @@ func _build_step(timed_out: bool, delta: float) -> void:
 			placed = manager.try_build_teepee(pos)
 		elif kind == "block" and manager and manager.has_method("try_build_block"):
 			placed = manager.try_build_block(pos)
+		elif kind == "stair" and manager and manager.has_method("try_build_stair"):
+			placed = manager.try_build_stair(pos)
+		elif kind == "roof" and manager and manager.has_method("try_build_roof"):
+			placed = manager.try_build_roof(pos)
+		elif kind == "small" and manager and manager.has_method("try_build_small"):
+			placed = manager.try_build_small(pos)
 		elif manager and manager.has_method("try_build_fence"):
 			placed = manager.try_build_fence(pos, float(seg["yaw"]))
 		if placed:
@@ -1732,6 +1759,7 @@ func _accept_order(kind: String, paid: bool = false) -> void:
 		"gather":
 			_target_node = _nearest_food_source()
 			if _target_node:
+				_search_streak = 0   # something real was in sight -- the outward drift resets
 				_think("Berries! On my way.", 2.0)
 			else:
 				_begin_fallback("No berries close by... I'll look around.")
@@ -1740,6 +1768,7 @@ func _accept_order(kind: String, paid: bool = false) -> void:
 				_has_club = true
 				_target_node = _nearest_animal()
 				if _target_node:
+					_search_streak = 0
 					_think("Club in hand — I'll run it down.", 2.0)
 				else:
 					_begin_fallback("No animals around... I'll search.")
@@ -1762,6 +1791,7 @@ func _accept_order(kind: String, paid: bool = false) -> void:
 			_work_time = 22.0   # trees can be a hike away; allow the round trip
 			_target_node = _nearest_tree()
 			if _target_node:
+				_search_streak = 0
 				_think("Off to chop wood.", 2.0)
 			else:
 				_begin_fallback("No trees nearby to chop...")
@@ -1788,6 +1818,7 @@ func _accept_order(kind: String, paid: bool = false) -> void:
 				return
 			_target_node = _nearest_neutral()
 			if _target_node:
+				_search_streak = 0
 				_think("Off to win over a wanderer...", 2.0)
 			else:
 				_begin_fallback("No wanderers nearby to recruit...")
@@ -1801,10 +1832,26 @@ func _accept_order(kind: String, paid: bool = false) -> void:
 		manager.flash_order_ack(member_name, kind, true)
 	print("[%s] ACCEPTED order: %s (rank %s)" % [member_name, kind, current_rank])
 
-# go to a random distant spot (used by scout, or when nothing's around to work)
+# Search for work (used by scout, or when nothing qualifying is in sight).
+# Pushes progressively FURTHER from the member's CURRENT position with each
+# consecutive failure (see _search_streak above) -- not a fixed ring around
+# home_pos, which just meant re-checking the same stripped-bare radius over
+# and over. A long enough streak is also this member's cue that they're
+# genuinely far out and a real candidate to found a new outpost stockpile.
 func _begin_fallback(msg: String) -> void:
+	_search_streak += 1
+	if _search_streak >= EXPANSION_SEARCH_STREAK and manager and manager.has_method("found_outpost"):
+		if manager.found_outpost(global_position):
+			_search_streak = 0
+			TribeMemory.remember(member_name, "founded_outpost", "You",
+				"I'd wandered far enough from camp that I raised a new stockpile right here.",
+				"proud", 0.05)
+			_think("New ground -- a stockpile goes here!", 2.5)
+			return
+	var radius: float = minf(SEARCH_RADIUS_MAX,
+		SEARCH_RADIUS_BASE + float(_search_streak - 1) * SEARCH_RADIUS_GROWTH)
 	var ang := randf() * TAU
-	_target = home_pos + Vector3(cos(ang), 0.0, sin(ang)) * 10.0
+	_target = global_position + Vector3(cos(ang), 0.0, sin(ang)) * radius
 	_target.y = home_pos.y
 	_target_node = null
 	_think(msg, 2.2)
@@ -1863,6 +1910,16 @@ func _is_claimed(n: Node3D) -> bool:
 			return true
 	return false
 
+## VISION-GATED (2026-07-20): a picker used to consider EVERY matching node in
+## the whole world, however far away -- a member could get sent on a
+## half-map trek for the globally-nearest bush while a dozen closer ones sat
+## unseen behind them because they simply hadn't been compared against
+## distance at all. Real work should come from what's actually in sight
+## (SIGHT_RADIUS -- the same radius _sense_environment() already uses for
+## sees_raider/sees_prey); if nothing qualifying is within it, the picker
+## returns null and the caller falls to _begin_fallback(), which now SEARCHES
+## outward instead of idling (see below) -- that's the intended fallback,
+## not a bug to route around by silently widening the search radius here.
 func _nearest_food_source() -> Node3D:
 	var best: Node3D = null
 	var bd := INF
@@ -1871,7 +1928,7 @@ func _nearest_food_source() -> Node3D:
 		if n and is_instance_valid(n) and n.has_method("harvest") and float(n.amount) >= 1.0 \
 				and not _is_claimed(n):
 			var d := global_position.distance_to(n.global_position)
-			if d < bd:
+			if d <= SIGHT_RADIUS and d < bd:
 				bd = d
 				best = n
 	return best
@@ -1883,7 +1940,7 @@ func _nearest_animal() -> Node3D:
 		var n := a as Node3D
 		if n and is_instance_valid(n) and not _is_claimed(n):
 			var d := global_position.distance_to(n.global_position)
-			if d < bd:
+			if d <= SIGHT_RADIUS and d < bd:
 				bd = d
 				best = n
 	return best
@@ -1895,7 +1952,7 @@ func _nearest_neutral() -> Node3D:
 		var nn := n as Node3D
 		if nn and is_instance_valid(nn) and not _is_claimed(nn):
 			var d := global_position.distance_to(nn.global_position)
-			if d < bd:
+			if d <= SIGHT_RADIUS and d < bd:
 				bd = d
 				best = nn
 	return best
@@ -1928,7 +1985,7 @@ func _nearest_tree() -> Node3D:
 		var n := t as Node3D
 		if n and is_instance_valid(n) and n.has_method("chop") and not _is_claimed(n):
 			var d := global_position.distance_to(n.global_position)
-			if d < bd:
+			if d <= SIGHT_RADIUS and d < bd:
 				bd = d
 				best = n
 	return best
