@@ -271,18 +271,48 @@ func _say_to(member: Node, text: String, delay: float) -> void:
 	# context_for() (its echo guard deliberately excludes this exact thing).
 	# Staleness-gated the same way as that echo guard: if you closed chat and
 	# came back much later, "just now" would be actively misleading.
+	#
+	# BUG FIXED (2026-07-17): this used to attach unconditionally whenever a
+	# recent reply existed, regardless of whether the NEW line actually reads
+	# like a follow-up. Caught live: a member with a huge feed history (46
+	# real feeds) got asked "of course" (fine, a genuine acknowledgment,
+	# continuity helped) then "are you in a good mood" -- a completely
+	# unrelated fresh question -- and answered it with nearly the SAME food
+	# line as before, because the continuity note kept quoting the food reply
+	# back as "what you just said" and the model anchored on it regardless.
+	# _looks_like_followup() gates this now: only short, reference-shaped
+	# lines ("why", "why not", "and?") get the continuity nudge. A real new
+	# question is left free to draw fresh material from context_for().
 	const CONTINUITY_WINDOW := 90.0
 	var continuity: String = ""
-	if _last_own_reply.has(npc_name):
+	if _looks_like_followup(text) and _last_own_reply.has(npc_name):
 		var rec: Dictionary = _last_own_reply[npc_name]
 		if (Time.get_ticks_msec() / 1000.0) - float(rec["t"]) < CONTINUITY_WINDOW:
-			continuity = " (Just now, you told them: \"%s\" -- if what they're saying " % str(rec["text"]) \
-				+ "now is a direct follow-up to that, answer as a continuation of it, " \
-				+ "not a new unrelated thought.)"
+			continuity = " (Just now, you told them: \"%s\" -- what they're saying " % str(rec["text"]) \
+				+ "now is a direct follow-up to that specifically, so answer as a " \
+				+ "continuation of it, not a new unrelated thought.)"
 	TribeLLM.say_as(npc_name, "You", persona,
 		TribeMemory.context_for(npc_name, "You"),
 		"Your leader just said to you: \"%s\".%s Answer them directly.%s" % [text, continuity, guard],
 		_fallback(str(member.get("personality"))), "player", TribeTalk.roster_string())
+
+## Does `text` read as a reference-only continuation of what was just said,
+## rather than a fresh new thought? Known follow-up phrasings, OR anything
+## very short (<=2 words) -- a short reactive line ("of course", "thanks",
+## "why not") is usually riding on what was just said, while anything longer
+## ("are you in a good mood") is its own new topic even if not literally long.
+const FOLLOWUP_MARKERS := ["why", "why not", "how come", "how so", "what do you mean",
+	"and then", "but why", "really", "go on", "so"]
+
+func _looks_like_followup(text: String) -> bool:
+	var low: String = text.strip_edges().to_lower().rstrip("?!.")
+	if low == "":
+		return false
+	for m in FOLLOWUP_MARKERS:
+		if low == m or low.begins_with(m + " "):
+			return true
+	var words: PackedStringArray = low.split(" ", false)
+	return words.size() <= 2
 
 func _flavour(p: String) -> String:
 	var f: Dictionary = {
