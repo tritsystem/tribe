@@ -1055,13 +1055,29 @@ func _begin_carve() -> void:
 	state = St.AWAY
 	_think("Off to find wood for a club...", 2.0)
 
-# ── eat from the tribe stockpile when hungry; starve if the larder is bare ──
+# ── eat from personal rations first; trusted members can then draw on the
+# shared stockpile; starve only if truly nothing is available anywhere ──
 func _hunger_step(delta: float) -> void:
 	hunger = minf(100.0, hunger + delta * HUNGER_RATE)
-	# members eat their OWN rations — only YOU (the leader) draw from the stockpile
 	if hunger >= EAT_AT and inv_food > 0:
 		inv_food -= 1
 		hunger = maxf(0.0, hunger - EAT_RESTORE)
+	elif hunger >= EAT_AT and current_rank != "Stranger" \
+			and manager and manager.has_method("spend_food"):
+		# TRUST-GATED STOCKPILE ACCESS (2026-07-17): previously a member's own
+		# ration (inv_food, replenished only by their own gathering) was the
+		# ONLY source of food they could ever draw on -- once it ran dry they
+		# starved regardless of how much you trusted them, and only the
+		# PLAYER could ever touch the shared stockpile. A Stranger hasn't
+		# earned that access; anyone Acquaintance rank or better ("level 1"
+		# trust -- the first real tier above the untrusted default) now can,
+		# the same spend_food() the player's own feeding and FPSPlayer's own
+		# survival already use.
+		if manager.spend_food(1):
+			hunger = maxf(0.0, hunger - EAT_RESTORE)
+			TribeMemory.remember(member_name, "self_fed", "You",
+				"I helped myself to the stockpile -- you trust me enough for that now.",
+				"neutral", 0.0)
 	if hunger >= 100.0:
 		starve(delta)                       # bond rots, may defect
 		hp = maxf(0.0, hp - delta * 2.0)    # and they physically weaken
