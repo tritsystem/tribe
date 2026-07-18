@@ -205,6 +205,16 @@ func _on_line(speaker: String, listener: String, text: String, tag: String) -> v
 			"I told %s: \"%s\"" % [listener, text], "neutral", 0.02)
 		TribeMemory.remember(listener, "heard", speaker,
 			"%s said to me: \"%s\"" % [speaker, text], "neutral", 0.03)
+		# NPC<->NPC feelings, driven by the loyalty-rank gap between the two --
+		# see tribemember.gd's npc_talk_effect() for the real mechanic.
+		var spk_node = _speakers.get(speaker)
+		var lst_node = _speakers.get(listener)
+		if spk_node and is_instance_valid(spk_node) and spk_node.has_method("npc_talk_effect") \
+				and lst_node and is_instance_valid(lst_node) and lst_node.has_method("loyalty_score"):
+			spk_node.npc_talk_effect(listener, lst_node.loyalty_score())
+		if lst_node and is_instance_valid(lst_node) and lst_node.has_method("npc_talk_effect") \
+				and spk_node and is_instance_valid(spk_node) and spk_node.has_method("loyalty_score"):
+			lst_node.npc_talk_effect(speaker, spk_node.loyalty_score())
 
 func _fallback_reply(m: Node) -> String:
 	var p: String = str(m.get("personality"))

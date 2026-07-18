@@ -271,6 +271,42 @@ const SHARE_RADIUS := 6.0
 const SHARE_SURPLUS_MIN := RATION_RESERVE + 2   # only give if comfortably above own reserve
 const SHARE_HUNGER_THRESHOLD := 70.0            # share with someone this hungry or worse
 var sees_raider: bool = false    # a non-neutral rival npc within SIGHT_RADIUS
+
+# ── NPC-to-NPC feelings + emotional override (2026-07-18) ──────────────────
+# Previously NPC<->NPC trust was explicitly NOT modelled (see tribe_rumor.gd's
+# own honest scope note) -- talking to a peer was flavour with nothing real to
+# move. Now every real conversation exchange (tribe_talk.gd's _on_line "reply"
+# case, the completed A<->B exchange) nudges how each feels about the OTHER,
+# driven by the gap between their standings with the LEADER (loyalty_score()):
+# talking with someone more loyal than you is reassuring (you think better of
+# them, and it calms your own resentment); talking with someone LESS loyal
+# than you drags on both -- you think a little less of them, and hearing a
+# grumbler rubs off as resentment even if your own brain's Trust/Follow
+# neurons are otherwise perfectly happy.
+#
+# THE OVERRIDE: resentment is deliberately NOT wired through the Spikeling
+# brain at all -- it is checked directly in _emotion_step() regardless of
+# is_backing_you/Follow-neuron state. That is the actual "emotion overtakes
+# neuron threshold" ask: a member can be numerically "Devoted" by the brain's
+# own bookkeeping (fed constantly, Follow neuron saturated) and still boil
+# over, because resentment is a separate accumulator the brain doesn't gate.
+# Once it boils, the grudge_target/grudge_intensity it leaves behind persists
+# and decays far slower than the resentment spike itself -- a real grudge,
+# not a passing mood that resets the moment the meter dips.
+const RESENTMENT_BOIL      := 1.0    # emotion overrides brain state at this level
+const RESENTMENT_DECAY     := 0.01   # passive fade per second once below boiling
+const GRUDGE_DECAY         := 0.004  # grudges outlive the resentment spike that made them
+const LOYALTY_GAP_FOR_EFFECT := 20   # rank-loyalty gap that counts as a real difference
+const TALK_OPINION_SCALE   := 400.0  # bigger = gentler opinion swings per conversation
+const TALK_RESENT_GAIN     := 0.05   # a conversation with someone less loyal than me
+const TALK_RESENT_RELIEF   := 0.03   # a conversation with someone more loyal than me
+const OPINION_GRUDGE_PICK  := -0.15  # how sour npc_opinion must be to pick a peer target
+
+var npc_opinion: Dictionary = {}     # peer member_name -> float -1..1, how I feel about them
+var resentment: float = 0.0          # slow-building disgruntlement, separate from the brain
+var grudge_target: String = ""       # "" none, "You" = the leader, else a peer's member_name
+var grudge_intensity: float = 0.0    # persists once formed; decays far slower than resentment
+var _emotion_cd: float = 0.0
 var sees_prey: bool = false      # a huntable animal within SIGHT_RADIUS
 var hears_danger: bool = false   # a non-neutral rival within HEARING_RADIUS but beyond sight
 const CHASE_GIVEUP_TIME := 7.0
@@ -731,6 +767,80 @@ func _maybe_share_food() -> void:
 			"%s shared their food with me when I was hungry." % giver_name, "grateful", 0.02)
 		return   # one act of generosity per poll, not a firehose
 
+## How much this member's standing with the leader is worth toward accepting
+## risky orders -- reused here as the "loyalty ranking" that peer talk and
+## grudges are driven by (see RANK_LOYALTY at the top of the file).
+func loyalty_score() -> int:
+	return int(RANK_LOYALTY.get(current_rank, 0))
+
+## Called once per completed NPC<->NPC conversation exchange (both directions
+## -- see tribe_talk.gd's _on_line "reply" branch) with the PEER's own
+## loyalty_score(). Moves my opinion of them and my own resentment based on
+## the gap between our standings with the leader -- a real, mechanical
+## consequence of "who talks to whom", not flavour text.
+func npc_talk_effect(peer_name: String, peer_loyalty: int) -> void:
+	var gap: int = peer_loyalty - loyalty_score()   # positive: peer more loyal than me
+	var delta: float = clampf(float(gap) / TALK_OPINION_SCALE, -0.08, 0.08)
+	npc_opinion[peer_name] = clampf(float(npc_opinion.get(peer_name, 0.0)) + delta, -1.0, 1.0)
+	if gap >= LOYALTY_GAP_FOR_EFFECT:
+		resentment = maxf(0.0, resentment - TALK_RESENT_RELIEF)   # a steadier peer calms me
+	elif gap <= -LOYALTY_GAP_FOR_EFFECT:
+		resentment = minf(RESENTMENT_BOIL * 2.0, resentment + TALK_RESENT_GAIN)  # a grumbler rubs off
+
+## Background pass for the slow-building emotional layer above: decays
+## resentment and any standing grudge over time, and checks whether raw
+## disgruntlement has crossed its own boiling point -- DELIBERATELY not
+## gated on brain state (is_backing_you, Follow-neuron fire count) at all.
+## That's the actual override: the Spikeling brain can be perfectly content
+## while resentment, an entirely separate accumulator, still boils over.
+func _emotion_step(delta: float) -> void:
+	resentment = maxf(0.0, resentment - RESENTMENT_DECAY * delta)
+	if grudge_target != "":
+		grudge_intensity = maxf(0.0, grudge_intensity - GRUDGE_DECAY * delta)
+		if grudge_intensity <= 0.0:
+			grudge_target = ""
+	if resentment < RESENTMENT_BOIL or (_foe != null and is_instance_valid(_foe)) or _leaving:
+		return
+	_boil_over()
+
+## Extremely disgruntled: turn on whoever they resent most nearby, or the
+## leader if no peer stands out. Sets _foe directly -- the SAME mechanism
+## take_hit()'s self-defense and the perimeter-guard threat-scan already use,
+## so the fight itself runs through the existing, already-tested combat loop
+## (_strike_foe()/_try_throw_at in _physics_process). The grudge that's left
+## behind outlives the resentment spike that caused it (GRUDGE_DECAY).
+func _boil_over() -> void:
+	var target_name := ""
+	var target_node: Node3D = null
+	var worst: float = OPINION_GRUDGE_PICK
+	for o in SpatialGrid.query(global_position, SHARE_RADIUS, "tribe"):
+		var n := o as Node3D
+		if n == null or n == self or not is_instance_valid(n):
+			continue
+		var nm = n.get("member_name")
+		if nm == null:
+			continue   # not a real tribemember (e.g. a dog) -- nothing to hold a grudge against
+		var op: float = float(npc_opinion.get(str(nm), 0.0))
+		if op < worst:
+			worst = op
+			target_name = str(nm)
+			target_node = n
+	if target_node == null:
+		var pl := get_tree().get_first_node_in_group("player") as Node3D
+		if pl == null:
+			return
+		target_name = "You"
+		target_node = pl
+	grudge_target = target_name
+	grudge_intensity = 1.0
+	_foe = target_node
+	_chase_timer = CHASE_GIVEUP_TIME
+	_think("I've had ENOUGH of this.", 2.5)
+	TribeMemory.remember(member_name, "boiled_over", target_name,
+		"I couldn't take it anymore -- I turned on %s." % target_name, "furious",
+		-0.15 if target_name == "You" else 0.0)
+	resentment = RESENTMENT_BOIL * 0.5   # vents some heat, but the grudge itself lingers
+
 ## Closest matching entity's distance within `radius`, or -1.0 if none.
 ## `rivals_only` filters to non-neutral (hostile) members of the group --
 ## used for "npc" (rival tribespeople), irrelevant for "animal".
@@ -949,6 +1059,7 @@ func _physics_process(delta: float) -> void:
 	_update_rank()
 	_update_faction_mark()
 	trust_display = lerpf(trust_display, clampf(relationship / TRUST_BAR_SCALE, 0.0, 1.0), delta * 4.0)
+	_emotion_step(delta)
 
 	# thoughts
 	_thought_timer -= delta
