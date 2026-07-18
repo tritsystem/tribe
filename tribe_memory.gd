@@ -70,27 +70,55 @@ func remember(agent: String, event_type: String, target: String, summary: String
 		_pending[agent] = []
 	var arr: Array = _mem[agent]
 	var pend: Array = _pending[agent]
-	# COALESCE (see COALESCE_WINDOW): if the newest memory is the same kind of
+	# COALESCE (see COALESCE_WINDOW): if a RECENT memory is the same kind of
 	# thing about the same target and still fresh, fold this into it rather than
 	# stacking a near-duplicate. trust_change ACCUMULATES (16 feeds really did
 	# move trust 16 times) but it stays ONE remembered event, which is how a
 	# person would hold it: "you kept feeding me", not 16 separate incidents.
-	if arr.size() > 0:
-		var last: Dictionary = arr[-1]
-		if last["type"] == event_type and last["target"] == target \
-				and (m["t"] - float(last["t"])) < COALESCE_WINDOW:
+	#
+	# BUG FIXED (2026-07-17): this used to only check arr[-1], the LITERAL last
+	# entry. But _update_rank() writes a "bond" memory on every Follow-fire --
+	# and rapid feeding fires Follow repeatedly -- so a bond entry routinely
+	# lands BETWEEN two fed events. arr[-1] was then "bond", type mismatch, so
+	# each feed in a burst became its own separate memory instead of coalescing.
+	# Caught live: 4 real feeds in 4 seconds produced 4 separate "fed" memories,
+	# flooding context_for()'s candidate pool with redundant food content and
+	# crowding out everything else -- three different chat questions all got
+	# food-themed replies because food genuinely was ALL of the recent memory.
+	#
+	# Fixed by scanning backward for the most recent SAME-type+target entry,
+	# bounded ONLY by COALESCE_WINDOW (time), not by array distance. A first
+	# attempt bounded the scan by a fixed number of array steps instead, and
+	# this test file caught why that's wrong: coalescing COMPACTS the array (5
+	# interleaved bond events collapse into 1 slot as they coalesce with each
+	# other), so a small step-count bound doesn't actually correspond to "how
+	# much unrelated stuff happened" once compaction is in play -- it let the
+	# scan reach further back than intended in one direction and not far enough
+	# in another. Time is the only bound that means what it says regardless of
+	# how compact the array gets.
+	var idx: int = arr.size() - 1
+	while idx >= 0:
+		var last: Dictionary = arr[idx]
+		if (m["t"] - float(last["t"])) >= COALESCE_WINDOW:
+			break   # this and everything before it (array is time-ordered) is too old
+		if last["type"] == event_type and last["target"] == target:
 			last["summary"] = summary
 			last["emotion"] = emotion
 			last["stamp"] = m["stamp"]
 			last["t"] = m["t"]
 			last["trust_change"] = float(last["trust_change"]) + trust_change
-			# rewrite the tail line if it hasn't hit disk yet; otherwise the next
-			# flush appends the settled version (bounded by the flush interval)
-			if pend.size() > 0:
+			# rewrite the tail pending line only when we coalesced into the actual
+			# tail entry; a skip-coalesce (into a non-tail entry, because
+			# something else was appended after it) leaves the earlier disk line
+			# as-is and appends the settled version fresh -- a minor disk-
+			# formatting wrinkle, not a behavior bug: context_for() reads _mem
+			# (fixed above), not disk.
+			if idx == arr.size() - 1 and pend.size() > 0:
 				pend[-1] = _as_markdown(last)
 			else:
 				pend.append(_as_markdown(last))
 			return
+		idx -= 1
 	arr.append(m)
 	if arr.size() > MAX_RAM_MEMORIES:
 		arr.pop_front()                  # RAM is a window; disk is the full record
