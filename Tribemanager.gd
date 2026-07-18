@@ -900,6 +900,16 @@ func suggest_job(_member) -> String:
 		return "hunt"
 	if randf() < 0.15:
 		return "scout"
+	# BUG FIXED (2026-07-18): "recruit" was never a candidate here at all --
+	# _start_job()'s "recruit" case and tribemember.gd's _do_recruit() already
+	# handle the whole flow correctly (including gathering food first if the
+	# tribe's short), but nothing ever CHOSE to try it autonomously. The only
+	# way a member ever recruited was the player explicitly ordering it
+	# (numeric key [6] or a typed/spoken "recruit" command). Existence-only
+	# check (no distance cap), matching have_bushes/have_animals/have_trees'
+	# own style above -- _do_recruit() itself has no distance cap either.
+	if not get_tree().get_nodes_in_group("neutral").is_empty() and randf() < 0.2:
+		return "recruit"
 	if have_bushes:
 		return "gather"
 	return ""

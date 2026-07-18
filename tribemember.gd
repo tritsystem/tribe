@@ -258,6 +258,18 @@ const SIGHT_RADIUS := 12.0
 const HEARING_RADIUS := 24.0
 const SENSE_INTERVAL := 1.5      # seconds; environment doesn't need 10Hz precision
 var _sense_cd: float = 0.0
+
+# ── NPC-to-NPC food sharing (2026-07-18) ──────────────────────────────────
+# Previously the only food transfers in this whole game were player->member
+# (contribute()) and member->shared-stockpile (the trust-gated self-feeding
+# above). Members never helped EACH OTHER -- a member sitting on a surplus
+# would let a tribemate right next to them starve. Checked on the same poll
+# as _sense_environment() (SHARE_RADIUS is deliberately much tighter than
+# SIGHT_RADIUS -- sharing a meal means being right next to someone, not
+# just able to see them across camp).
+const SHARE_RADIUS := 6.0
+const SHARE_SURPLUS_MIN := RATION_RESERVE + 2   # only give if comfortably above own reserve
+const SHARE_HUNGER_THRESHOLD := 70.0            # share with someone this hungry or worse
 var sees_raider: bool = false    # a non-neutral rival npc within SIGHT_RADIUS
 var sees_prey: bool = false      # a huntable animal within SIGHT_RADIUS
 var hears_danger: bool = false   # a non-neutral rival within HEARING_RADIUS but beyond sight
@@ -681,6 +693,44 @@ func _sense_environment() -> void:
 				TribeMemory.remember(member_name, "heard_danger", "You",
 					"I heard signs of a rival nearby, though I couldn't see them.", "wary", 0.0)
 
+## Give one unit of this member's OWN surplus food to a hungry tribemate
+## standing right next to them. Previously the only food transfers in this
+## game were player->member and member->shared-stockpile; members never
+## helped each other directly. Real, narrow conditions: must have a real
+## surplus above their own reserve (never share down into their own hunger
+## risk), the recipient must be genuinely hungry (not just "not full"), and
+## it only ever gives to ONE tribemate per poll (a single meaningful act,
+## not a food-teleportation network). Dogs share the "tribe" group too --
+## guarded with real property checks, not a name/type assumption.
+func _maybe_share_food() -> void:
+	if inv_food <= SHARE_SURPLUS_MIN:
+		return
+	for o in SpatialGrid.query(global_position, SHARE_RADIUS, "tribe"):
+		var n := o as Node3D
+		if n == null or not is_instance_valid(n) or n == self:
+			continue
+		var h = n.get("hunger")
+		var nf = n.get("inv_food")
+		if h == null or nf == null:
+			continue   # not a real tribemember (e.g. a dog) -- no ration system to share into
+		if float(h) < SHARE_HUNGER_THRESHOLD:
+			continue
+		var d: float = global_position.distance_to(n.global_position)
+		if d > SHARE_RADIUS:
+			continue
+		inv_food -= 1
+		n.inv_food = int(nf) + 1
+		n.hunger = maxf(0.0, float(h) - EAT_RESTORE)
+		var giver_name: String = member_name
+		var recv_name: String = str(n.get("member_name"))
+		if n.has_method("_think"):
+			n._think("%s shared food with me." % giver_name, 2.0)
+		TribeMemory.remember(giver_name, "shared_food", recv_name,
+			"I shared some of my food with %s." % recv_name, "warm", 0.0)
+		TribeMemory.remember(recv_name, "shared_food", giver_name,
+			"%s shared their food with me when I was hungry." % giver_name, "grateful", 0.02)
+		return   # one act of generosity per poll, not a firehose
+
 ## Closest matching entity's distance within `radius`, or -1.0 if none.
 ## `rivals_only` filters to non-neutral (hostile) members of the group --
 ## used for "npc" (rival tribespeople), irrelevant for "animal".
@@ -881,6 +931,7 @@ func _physics_process(delta: float) -> void:
 		if _sense_cd <= 0.0:
 			_sense_cd = SENSE_INTERVAL
 			_sense_environment()
+			_maybe_share_food()
 
 	# register in the world spatial grid so rival npc.gd's "tribe" group
 	# queries (intruder/outnumber/war-target checks) can find us without
