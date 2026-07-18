@@ -595,6 +595,38 @@ func found_outpost(pos: Vector3) -> bool:
 	notify_cat("tribe", "The clan has founded %s -- a new settlement far from camp." % settlement_name)
 	return true
 
+# MIGRATION (2026-07-31): so a member can find and join an EXISTING
+# settlement instead of only the founder ever living there. Residency is
+# read straight off each member's own home_pos (the same field
+# tribemember.gd's _begin_fallback()/_start_migrate() re-anchor on
+# arrival) -- no separate roster to keep in sync.
+const RESIDENCE_RADIUS := 20.0
+
+func _resident_count(pos: Vector3) -> int:
+	var c := 0
+	for m in members:
+		if is_instance_valid(m) and "home_pos" in m and (m.home_pos as Vector3).distance_to(pos) <= RESIDENCE_RADIUS:
+			c += 1
+	return c
+
+## The least-populated founded settlement that `exclude_near` (a member's
+## OWN current home_pos) isn't already living at -- so this never suggests
+## "migrating" to the settlement a member already calls home.
+func least_populated_outpost(exclude_near: Vector3):
+	var best = null
+	var best_count := 999999
+	for o in outposts:
+		if not is_instance_valid(o):
+			continue
+		var opos: Vector3 = (o as Node3D).global_position
+		if opos.distance_to(exclude_near) <= RESIDENCE_RADIUS:
+			continue
+		var c := _resident_count(opos)
+		if c < best_count:
+			best_count = c
+			best = o
+	return best
+
 func _spawn_world() -> void:
 	_spawn_vegetation()
 	for _i in range(bush_count):

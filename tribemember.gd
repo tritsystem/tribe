@@ -1247,7 +1247,35 @@ func _auto_work(delta: float) -> void:
 	_job_cd = randf_range(3.0, 7.0)
 	if manager == null or not manager.has_method("suggest_job"):
 		return
+	# MIGRATION (2026-07-31): so far only a settlement's FOUNDER ever actually
+	# lived there -- everyone else stayed anchored at the original camp
+	# forever. A small, ongoing chance for an otherwise-idle member to join
+	# an existing settlement instead of picking a normal job spreads real
+	# population across the clan's cities rather than leaving each one a
+	# population of one. Picks the LEAST populated settlement so migrants
+	# spread out instead of piling onto whichever was founded first.
+	if randf() < MIGRATE_CHANCE and manager.has_method("least_populated_outpost"):
+		var dest = manager.least_populated_outpost(home_pos)
+		if dest != null:
+			_start_migrate((dest as Node3D).global_position)
+			return
 	_start_job(manager.suggest_job(self))
+
+const MIGRATE_CHANCE := 0.02   # per idle job-pick, so it's rare but ongoing
+
+func _start_migrate(dest: Vector3) -> void:
+	is_busy = true
+	_task_kind = "migrate"
+	_task_paid = false
+	_target_node = null
+	_task_food = 0
+	_task_mats = 0
+	_task_wood = 0
+	_task_result = ""
+	_target = dest
+	_work_time = 240.0   # a settlement can be well over 100m away -- allow the trek
+	state = St.AWAY
+	_think("Time to join the new settlement.", 2.5)
 
 func _start_job(job: String, forced: bool = false) -> void:
 	if job == "carve":
@@ -2167,6 +2195,15 @@ func _complete_task() -> void:
 					_standing_done += 1
 	if k == "raid":
 		return   # the manager resolves raid loot, not the member
+	if k == "migrate":
+		# arrived at the destination settlement -- re-anchor home_pos here,
+		# the same real "I live here now" hook the founder already gets (see
+		# _begin_fallback()'s own found_outpost() branch).
+		home_pos = global_position
+		TribeMemory.remember(member_name, "migrated", "You",
+			"I left the old camp behind and settled at the new one.", "hopeful", 0.03)
+		_think("I've settled in.", 2.5)
+		return
 	if k == "carve":
 		if manager and manager.has_method("craft_club") and manager.craft_club():
 			_think("Made a fresh club.", 2.0)
