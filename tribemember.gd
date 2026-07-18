@@ -129,6 +129,20 @@ func _brain_text() -> String:
 	t += "synapse SawDefend     -> Trust weight=95\n"
 	t += "synapse SawBetray     -> Trust weight=-160\n"
 	t += "synapse Trust -> Follow weight=%d\n" % int(p["follow_w"])
+	# ── environmental senses (2026-07-17) ── deliberately NOT wired into
+	# Trust/Follow: this brain's trust economy is hand-tuned and already
+	# verified (test_pyspike_orchestrator_parity.py's sibling here is this
+	# file's own real playtesting) -- bolting sight/hearing onto it blind
+	# risks destabilizing a calibrated system for a feature that was asked
+	# for as PERCEPTION, not as a trust modifier. These neurons exist so the
+	# brain genuinely REGISTERS its environment (fires, has real membrane
+	# state, is inspectable) and so brain_snapshot() can report real local
+	# awareness to the LLM -- grounding conversation in what's actually
+	# nearby right now, not just remembered history. Wiring them into
+	# behavior is a real next step, but a separate, deliberate one.
+	t += "neuron SawRaider  threshold=50 leak=30\n"
+	t += "neuron SawPrey    threshold=50 leak=30\n"
+	t += "neuron HeardDanger threshold=50 leak=30\n"
 	t += "refractory=2\n"
 	return t
 
@@ -217,6 +231,20 @@ const OUTNUMBER_THRESHOLD := 4   # this many nearby rival npcs and we run instea
 var _base_defense_cd: float = 0.0
 const BASE_DEFENSE_RADIUS := 26.0   # how far from the stockpile we'll proactively respond to a raider
 var _chase_timer: float = 0.0       # patience left to actually catch _foe before giving up — matches npc.gd
+
+# ── environmental senses: what this member can currently SEE or HEAR nearby ──
+# SIGHT is close-range and specific (you can tell WHAT it is); HEARING is
+# wider but coarser (you know something's there, not necessarily what). Both
+# are distance-only, same honest proxy every other proximity check in this
+# file already uses (_nearby_rival_count, _nearest_base_threat) -- no line of
+# sight/occlusion anywhere in this codebase, so this doesn't invent one.
+const SIGHT_RADIUS := 12.0
+const HEARING_RADIUS := 24.0
+const SENSE_INTERVAL := 1.5      # seconds; environment doesn't need 10Hz precision
+var _sense_cd: float = 0.0
+var sees_raider: bool = false    # a non-neutral rival npc within SIGHT_RADIUS
+var sees_prey: bool = false      # a huntable animal within SIGHT_RADIUS
+var hears_danger: bool = false   # a non-neutral rival within HEARING_RADIUS but beyond sight
 const CHASE_GIVEUP_TIME := 7.0
 
 # a LEADER-set standing order overrides the member's own AI until met
@@ -422,6 +450,16 @@ func _update_combat_visuals() -> void:
 func take_hit(dmg: float, attacker) -> void:
 	dmg *= (1.0 - armor_reduction())   # armor soaks part of the blow
 	hp -= dmg
+	# REAL HEARING, not just passive proximity: a hit landing is a genuine
+	# loud EVENT, broadcast at the moment it happens to every member within
+	# earshot -- including ones who can't currently SEE the fight (behind an
+	# obstacle, working elsewhere in camp). This is distinct from
+	# _sense_environment()'s continuous "is a rival body nearby" polling,
+	# which only ever detects a rival that's ALREADY visible/audible right
+	# now -- it can't represent a sudden noise from something not otherwise
+	# in range at all (a strike landing just beyond HEARING_RADIUS's steady
+	# check, or a hit that happens between two polling ticks).
+	_broadcast_combat_sound(global_position)
 	# betrayal: the PLAYER struck one of their own. Erodes Trust through the
 	# brain (see betray()) on top of the ordinary damage/self-defense below —
 	# a betrayed member still fights or flees like any other attack, they just
@@ -462,6 +500,104 @@ func _nearby_rival_count() -> int:
 		if global_position.distance_to(n.global_position) <= OUTNUMBER_RADIUS:
 			count += 1
 	return count
+
+# ── environmental senses: what's actually near us right now, fed to the brain
+# as real stimulation (see SawRaider/SawPrey/HeardDanger in _brain_text()) and
+# read back by brain_snapshot() for LLM conversation grounding. Uses
+# SpatialGrid.query() rather than a raw group scan -- same idiom npc.gd
+# already uses for its own proximity checks (see its OUTNUMBER_RADIUS query),
+# and exactly the class of check spatial_grid.gd's own docstring names as the
+# intended use case.
+#
+# GRADED DRIVE, mirrored from the real hardware sensor rig this project
+# already built (Spikeling/bridge.py + proximity_grid.spk -- 5 real HC-SR04
+# ultrasonic sensors, each driving its own LIF neuron): that rig computes
+# drive = max(0, 120 - 4*distance_cm), so something at the sensor's face
+# hits hard and something at the edge of range barely registers, instead of
+# a flat "in range = fire" boolean. _proximity_drive() below is the same
+# shape adapted to this game's radii/units -- physically-grounded intensity
+# falloff, not a threshold trigger, same as the real sensor array.
+func _sense_environment() -> void:
+	var raider_d := _nearest_distance("npc", SIGHT_RADIUS, true)
+	sees_raider = raider_d >= 0.0
+	if sees_raider:
+		brain.stimulate("SawRaider", _proximity_drive(raider_d, SIGHT_RADIUS))
+
+	var prey_d := _nearest_distance("animal", SIGHT_RADIUS, false)
+	sees_prey = prey_d >= 0.0
+	if sees_prey:
+		brain.stimulate("SawPrey", _proximity_drive(prey_d, SIGHT_RADIUS))
+
+	# HEARD is deliberately "within hearing but NOT already seen" -- otherwise
+	# a raider standing right next to you would double-stimulate both SawRaider
+	# and HeardDanger for the same single real event, which isn't two things
+	# happening, it's one thing described twice.
+	hears_danger = false
+	if not sees_raider:
+		var heard_d := _nearest_distance("npc", HEARING_RADIUS, true)
+		hears_danger = heard_d >= 0.0
+		if hears_danger:
+			brain.stimulate("HeardDanger", _proximity_drive(heard_d, HEARING_RADIUS))
+
+## Closest matching entity's distance within `radius`, or -1.0 if none.
+## `rivals_only` filters to non-neutral (hostile) members of the group --
+## used for "npc" (rival tribespeople), irrelevant for "animal".
+func _nearest_distance(group: String, radius: float, rivals_only: bool) -> float:
+	# BUG FIXED (2026-07-17): SpatialGrid.query() is a CELL-based pre-filter,
+	# not an exact-radius one -- it walks every cell that could possibly
+	# contain something within `radius` (a square block of cells), which is a
+	# superset of the actual circle. A hit in the corner of that block can be
+	# meaningfully farther than `radius` in real straight-line distance.
+	# npc.gd's own SpatialGrid usage already re-checks exact distance after
+	# querying for exactly this reason; this function was missing that same
+	# recheck. Caught by this feature's own regression test: an entity placed
+	# 18 units away registered as "seen" under a 12-unit SIGHT_RADIUS query.
+	var best := -1.0
+	for o in SpatialGrid.query(global_position, radius, group):
+		var n := o as Node3D
+		if n == null or not is_instance_valid(n):
+			continue
+		if rivals_only and n.get("neutral"):
+			continue
+		var d: float = global_position.distance_to(n.global_position)
+		if d > radius:
+			continue
+		if best < 0.0 or d < best:
+			best = d
+	return best
+
+## Same shape as the real sensor rig's drive = max(0, 120 - 4*distance):
+## full intensity at distance 0, tapering linearly to 0 exactly at `radius`.
+func _proximity_drive(distance: float, radius: float) -> float:
+	return maxf(0.0, 100.0 * (1.0 - distance / radius))
+
+## Broadcasts a real, one-off combat sound from `pos` to every tribe member
+## within HEARING_RADIUS -- called once per hit landed (see take_hit()), not
+## polled. Every member in earshot gets their HeardDanger neuron stimulated
+## directly, graded by distance from the EVENT (not from each listener's own
+## unrelated position check), so someone standing right next to a fight hears
+## it far more sharply than someone at the edge of earshot. Uses the "tribe"
+## group (own members) rather than "npc" -- this is about a member reacting
+## to a fight happening near THEM, regardless of who's fighting whom.
+static func _broadcast_combat_sound(pos: Vector3) -> void:
+	for o in SpatialGrid.query(pos, HEARING_RADIUS, "tribe"):
+		var n := o as Node3D
+		if n == null or not is_instance_valid(n) or not n.has_method("_hear_combat"):
+			continue
+		var d: float = pos.distance_to(n.global_position)
+		if d > HEARING_RADIUS:
+			continue
+		n._hear_combat(d)
+
+## Applies real HeardDanger stimulation from a heard (not necessarily seen)
+## combat event -- see _broadcast_combat_sound(). Also updates hears_danger
+## so brain_snapshot() reflects it immediately rather than waiting for the
+## next _sense_environment() poll.
+func _hear_combat(distance: float) -> void:
+	if brain == null:
+		return
+	hears_danger = true
+	brain.stimulate("HeardDanger", _proximity_drive(distance, HEARING_RADIUS))
 
 # the nearest actual threat to the camp — a raider actively sieging the base,
 # or anyone already at war, within reach of the stockpile. Deliberately NOT
@@ -593,6 +729,12 @@ func _physics_process(delta: float) -> void:
 		while _tick_accum >= interval:
 			_tick_accum -= interval
 			_brain_tick()
+		# environmental senses -- same LOD gate as the brain itself, since a
+		# member the brain isn't ticking for has no reason to poll the world
+		_sense_cd -= delta
+		if _sense_cd <= 0.0:
+			_sense_cd = SENSE_INTERVAL
+			_sense_environment()
 
 	# register in the world spatial grid so rival npc.gd's "tribe" group
 	# queries (intruder/outnumber/war-target checks) can find us without
@@ -1012,6 +1154,16 @@ func brain_snapshot() -> String:
 	if betrayed_count > 0:
 		parts.append("The Leader has struck you %d time%s. You have not forgotten it." % [
 			betrayed_count, "" if betrayed_count == 1 else "s"])
+	# ENVIRONMENTAL SENSES (2026-07-17): grounds the conversation in what's
+	# actually near this member RIGHT NOW, not just remembered history -- see
+	# _sense_environment(). Stated as plain fact for the model to react to in
+	# its own voice, same discipline as the rest of this function.
+	if sees_raider:
+		parts.append("You can see a rival tribesperson nearby right now, and it's putting you on edge.")
+	if sees_prey:
+		parts.append("There's huntable game in sight nearby.")
+	if hears_danger:
+		parts.append("You can hear signs of a rival nearby, even though you can't see them.")
 	return " ".join(parts)
 
 func _brain_tick() -> void:
