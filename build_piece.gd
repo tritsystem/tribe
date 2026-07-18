@@ -5,32 +5,53 @@ extends StaticBody3D
 # static mesh across every instance for perf), this script gives builders
 # real DIFFERENT pieces to place: STAIR (a shallow wedge — climbable half
 # steps up a wall or tower), ROOF (a steeper triangular-prism cap — actually
-# reads as a roof from outside, not a flat block lid), and SMALL (a
-# half-size cube for fine-tuning: corners, ledges, in-fill that shouldn't be
-# forced onto the coarse 2.0-unit wall grid).
+# reads as a roof from outside, not a flat block lid), DOOR (a narrow slab
+# that fills a gate opening — a real door, not just an unguarded gap in the
+# wall), and SMALL (a half-size cube for fine-tuning: corners, ledges,
+# in-fill that shouldn't be forced onto the coarse 2.0-unit wall grid).
+#
+# ROTATION + SIZE (2026-07-21): every piece now carries its own `yaw`
+# (applied to the WHOLE body, not just the mesh, so collision turns with it)
+# and `scale_factor` (0.5 small / 1.0 normal / 1.5 large, applied the same
+# way) -- BUG FIX: the very first version of this file placed STAIR pieces
+# at a fixed inward fraction of a tower's radius with no size/rotation
+# awareness at all, which put them physically INSIDE the tower's own block
+# columns (the two were less than one block-width apart) -- overlapping
+# geometry that looked broken and made it look like "building" itself had
+# stopped working, when the pieces were in fact placing successfully, just
+# on top of each other. Real rotation + real configurable spacing (see
+# Tribemanager._fortress_block_segments) is the actual fix, not a fudge
+# factor -- a stair now sits flush OUTSIDE its tower, angled to face it.
 #
 # SAME PERFORMANCE DISCIPLINE AS block.gd: a castle can mean hundreds of
 # these live at once, so mesh/material are cached ONE PER KIND (a static
-# Dictionary keyed by Kind), never allocated per-instance. That's what
-# actually lets these look genuinely different from each other without
-# paying block.gd's own reason for going shared-static in the first place.
+# Dictionary keyed by Kind), never allocated per-instance. Scale is applied
+# to the NODE transform, not baked into the mesh, so the shared-mesh cache
+# still holds across every size variant of a given kind.
 #
-# Godot 4's PrismMesh is the natural fit for both STAIR and ROOF: it's a
-# real wedge/ridge primitive (a `left_to_right` taper on a box), not a
-# hand-modelled shape — a stair is a prism laid low and wide, a roof is the
-# same primitive stood taller and narrower so it reads as a ridge, not a
-# ramp. Collision uses a plain bounding box for both (there is no native
-# collision primitive matching a prism, and a slightly generous box is the
-# same honest approximation block.gd already uses for its own cube).
+# Godot 4's PrismMesh is the natural fit for STAIR and ROOF: it's a real
+# wedge/ridge primitive (a `left_to_right` taper on a box), not a
+# hand-modelled shape. Collision uses a plain bounding box for every kind
+# (there is no native collision primitive matching a prism, and a slightly
+# generous box is the same honest approximation block.gd already uses for
+# its own cube).
 # In group "build_piece".
 # ─────────────────────────────────────────────────────────────────────────────
 
 const FULL_SIZE := 2.0    # matches BlockScript.SIZE so pieces line up on the same grid
 const SMALL_SIZE := 1.0   # the fine-detail unit — half a full block
 
-enum Kind { STAIR, ROOF, SMALL }
+enum Kind { STAIR, ROOF, SMALL, DOOR }
+
+# size configuration ("different sizes", as asked) — a plain multiplier on
+# the node transform, so one cached mesh per kind still covers every size.
+const SCALE_SMALL  := 0.5
+const SCALE_NORMAL := 1.0
+const SCALE_LARGE  := 1.5
 
 var kind: Kind = Kind.STAIR
+var yaw: float = 0.0             # facing/rotation this piece is placed with
+var scale_factor: float = SCALE_NORMAL
 var hp: float = 16.0
 var owner_tribe = null   # set when a rival WorldTribe places this (cleanup bookkeeping)
 
@@ -44,6 +65,8 @@ func _ready() -> void:
 	# never wedge on their own construction — see block.gd's own comment for
 	# the full story of why walls moved off the default layer.
 	collision_layer = 8
+	rotation.y = yaw
+	scale = Vector3.ONE * scale_factor
 	_build()
 
 func _build() -> void:
@@ -78,6 +101,13 @@ static func _get_mesh(k: Kind) -> Mesh:
 			var b := BoxMesh.new()
 			b.size = Vector3(SMALL_SIZE, SMALL_SIZE, SMALL_SIZE) * 0.97
 			m = b
+		Kind.DOOR:
+			# a narrow, tall slab — fills a gate opening instead of leaving it
+			# an unguarded gap. Deliberately thin (0.2 deep) so it reads as a
+			# hinged door, not another wall block wedged into the gateway.
+			var b := BoxMesh.new()
+			b.size = Vector3(FULL_SIZE * 0.7, FULL_SIZE * 1.4, 0.2)
+			m = b
 	_mesh_cache[k] = m
 	return m
 
@@ -89,6 +119,7 @@ static func _get_mat(k: Kind) -> StandardMaterial3D:
 		Kind.STAIR: mat.albedo_color = Color(0.50, 0.36, 0.20)   # matches the wall it climbs
 		Kind.ROOF:  mat.albedo_color = Color(0.28, 0.17, 0.10)   # dark thatch, distinct from the wall
 		Kind.SMALL: mat.albedo_color = Color(0.45, 0.32, 0.18)   # same tone as block.gd's default
+		Kind.DOOR:  mat.albedo_color = Color(0.34, 0.22, 0.11)   # weathered plank, darker than the wall
 	_mat_cache[k] = mat
 	return mat
 
@@ -98,6 +129,7 @@ static func _get_shape(k: Kind) -> Shape3D:
 		Kind.STAIR: shape.size = Vector3(FULL_SIZE, FULL_SIZE * 0.5, FULL_SIZE)
 		Kind.ROOF:  shape.size = Vector3(FULL_SIZE * 1.15, FULL_SIZE * 1.2, FULL_SIZE)
 		Kind.SMALL: shape.size = Vector3(SMALL_SIZE, SMALL_SIZE, SMALL_SIZE)
+		Kind.DOOR:  shape.size = Vector3(FULL_SIZE * 0.7, FULL_SIZE * 1.4, 0.2)
 	return shape
 
 func take_damage(d: float, _attacker = null) -> void:

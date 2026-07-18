@@ -1302,17 +1302,24 @@ func _build_step(timed_out: bool, delta: float) -> void:
 		_steer_to(pos, delta)
 	else:
 		_halt()
+		# yaw/scale are optional on a segment (plain "block"/"teepee" pieces
+		# don't carry either) -- default to no rotation and normal size so
+		# older/simpler segment kinds are unaffected.
+		var seg_yaw: float = float(seg.get("yaw", 0.0))
+		var seg_scale: float = float(seg.get("scale", 1.0))
 		var placed := false
 		if kind == "teepee" and manager and manager.has_method("try_build_teepee"):
 			placed = manager.try_build_teepee(pos)
 		elif kind == "block" and manager and manager.has_method("try_build_block"):
 			placed = manager.try_build_block(pos)
 		elif kind == "stair" and manager and manager.has_method("try_build_stair"):
-			placed = manager.try_build_stair(pos)
+			placed = manager.try_build_stair(pos, seg_yaw, seg_scale)
 		elif kind == "roof" and manager and manager.has_method("try_build_roof"):
-			placed = manager.try_build_roof(pos)
+			placed = manager.try_build_roof(pos, seg_yaw, seg_scale)
 		elif kind == "small" and manager and manager.has_method("try_build_small"):
-			placed = manager.try_build_small(pos)
+			placed = manager.try_build_small(pos, seg_yaw, seg_scale)
+		elif kind == "door" and manager and manager.has_method("try_build_door"):
+			placed = manager.try_build_door(pos, seg_yaw, seg_scale)
 		elif manager and manager.has_method("try_build_fence"):
 			placed = manager.try_build_fence(pos, float(seg["yaw"]))
 		if placed:

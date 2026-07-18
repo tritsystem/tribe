@@ -142,6 +142,7 @@ const BLOCK_COST      := 1   # cheap — fortresses/mazes need many of these
 const STAIR_COST      := 1   # same grade as a wall block — it's a wall block cut in half
 const ROOF_COST       := 2   # a capping piece; costs a bit more than a plain wall course
 const SMALL_COST      := 1   # fine-detail unit — small, so priced like a stair
+const DOOR_COST       := 2   # a real hinged slab, priced like a roof
 const CLUB_COST      := 4
 const BUILD_RANGE    := 45.0
 var MAP_EXTENT       := 170.0   # scaled per-preset in _apply_scale — Massive needs
@@ -837,8 +838,13 @@ const BuildPieceScript = preload("res://build_piece.gd")
 
 # A shallow wedge — climbable half-steps up a wall or watchtower. Same
 # grid-snap + course-height convention as try_build_block() so a staircase
-# actually lines up flush against the wall it's climbing.
-func try_build_stair(pos: Vector3, by_player: bool = false) -> bool:
+# actually lines up flush against the wall it's climbing. `yaw` orients the
+# piece (a stair should face the structure it climbs, not always point the
+# same default direction) and `scale_factor` picks a real size variant
+# (BuildPieceScript.SCALE_SMALL/NORMAL/LARGE) rather than every piece being
+# forced to one fixed size.
+func try_build_stair(pos: Vector3, yaw: float = 0.0,
+		scale_factor: float = BuildPieceScript.SCALE_NORMAL, by_player: bool = false) -> bool:
 	if by_player and not _within_build_range(pos):
 		notify_cat(CAT_YOU, "Too far from camp — stay within %d of the stockpile." % int(BUILD_RANGE))
 		return false
@@ -849,6 +855,8 @@ func try_build_stair(pos: Vector3, by_player: bool = false) -> bool:
 	var b = StaticBody3D.new()
 	b.set_script(BuildPieceScript)
 	b.kind = BuildPieceScript.Kind.STAIR
+	b.yaw = yaw
+	b.scale_factor = scale_factor
 	add_child(b)
 	var seat := seat_build(pos.x, pos.z, 1.4)
 	var snapped: Vector3 = BlockScript.snap(pos)
@@ -857,7 +865,8 @@ func try_build_stair(pos: Vector3, by_player: bool = false) -> bool:
 	return true
 
 # A steep triangular-prism cap — reads as an actual roofline, not a flat lid.
-func try_build_roof(pos: Vector3, by_player: bool = false) -> bool:
+func try_build_roof(pos: Vector3, yaw: float = 0.0,
+		scale_factor: float = BuildPieceScript.SCALE_NORMAL, by_player: bool = false) -> bool:
 	if by_player and not _within_build_range(pos):
 		notify_cat(CAT_YOU, "Too far from camp — stay within %d of the stockpile." % int(BUILD_RANGE))
 		return false
@@ -868,6 +877,8 @@ func try_build_roof(pos: Vector3, by_player: bool = false) -> bool:
 	var b = StaticBody3D.new()
 	b.set_script(BuildPieceScript)
 	b.kind = BuildPieceScript.Kind.ROOF
+	b.yaw = yaw
+	b.scale_factor = scale_factor
 	add_child(b)
 	var seat := seat_build(pos.x, pos.z, 1.4)
 	var snapped: Vector3 = BlockScript.snap(pos)
@@ -879,7 +890,8 @@ func try_build_roof(pos: Vector3, by_player: bool = false) -> bool:
 # forced onto the coarse 2.0-unit wall grid. Deliberately NOT grid-snapped
 # to BlockScript's grid: the whole point is finer placement than that grid
 # allows.
-func try_build_small(pos: Vector3, by_player: bool = false) -> bool:
+func try_build_small(pos: Vector3, yaw: float = 0.0,
+		scale_factor: float = BuildPieceScript.SCALE_NORMAL, by_player: bool = false) -> bool:
 	if by_player and not _within_build_range(pos):
 		notify_cat(CAT_YOU, "Too far from camp — stay within %d of the stockpile." % int(BUILD_RANGE))
 		return false
@@ -890,6 +902,30 @@ func try_build_small(pos: Vector3, by_player: bool = false) -> bool:
 	var b = StaticBody3D.new()
 	b.set_script(BuildPieceScript)
 	b.kind = BuildPieceScript.Kind.SMALL
+	b.yaw = yaw
+	b.scale_factor = scale_factor
+	add_child(b)
+	var seat := seat_build(pos.x, pos.z, 1.0)
+	b.global_position = Vector3(pos.x, seat + pos.y, pos.z)
+	return true
+
+# A narrow slab that fills a gate opening — a real door, not just an
+# unguarded gap in the wall. Same yaw/scale_factor configuration as the
+# other pieces; a gate's own facing angle is what's normally passed in.
+func try_build_door(pos: Vector3, yaw: float = 0.0,
+		scale_factor: float = BuildPieceScript.SCALE_NORMAL, by_player: bool = false) -> bool:
+	if by_player and not _within_build_range(pos):
+		notify_cat(CAT_YOU, "Too far from camp — stay within %d of the stockpile." % int(BUILD_RANGE))
+		return false
+	if wood < DOOR_COST:
+		notify_cat(CAT_YOU, "Need %d wood for a door — chop more trees." % DOOR_COST)
+		return false
+	wood -= DOOR_COST
+	var b = StaticBody3D.new()
+	b.set_script(BuildPieceScript)
+	b.kind = BuildPieceScript.Kind.DOOR
+	b.yaw = yaw
+	b.scale_factor = scale_factor
 	add_child(b)
 	var seat := seat_build(pos.x, pos.z, 1.0)
 	b.global_position = Vector3(pos.x, seat + pos.y, pos.z)
@@ -1957,6 +1993,14 @@ func fence_ring_plan() -> Array:
 		var ang := TAU * float(i) / float(count)
 		if _near_gate(ang, gate_angles): continue
 		fence_segs.append({"kind": "fence", "pos": Vector3(cos(ang) * 7.0, 0.0, sin(ang) * 7.0), "yaw": ang + PI * 0.5})
+	# DOORS (2026-07-21): a gate used to just be a bare gap where the fence
+	# ring skipped a segment -- an unguarded hole, not an actual gate. A real
+	# door piece now fills each one, oriented the same way a fence segment at
+	# that angle would be (yaw = ang + PI/2, tangent to the ring).
+	for ga in gate_angles:
+		var gx := cos(float(ga)) * 7.0
+		var gz := sin(float(ga)) * 7.0
+		fence_segs.append({"kind": "door", "pos": Vector3(gx, 1.0, gz), "yaw": float(ga) + PI * 0.5})
 	# a ring of teepees just inside the fence line — homes for the camp
 	var teepee_count := 8
 	for i in range(teepee_count):
@@ -2009,32 +2053,53 @@ func _fortress_block_segments(radius: float, gate_angles: Array) -> Array:
 			segs.append({"kind": "block", "pos": Vector3(x, 5.0, z)})
 	# CORNER WATCHTOWERS (2026-07-19): four freestanding stacks at the
 	# diagonals, one course taller than the wall itself, so they read as
-	# towers rather than a slightly-taller stretch of wall. Placed just
-	# outside the wall ring (radius + size) so a tower column never lands
-	# on a cell the perimeter loop above already claimed.
-	var tower_r := radius + size
+	# towers rather than a slightly-taller stretch of wall.
+	#
+	# BUG FIX (2026-07-21): tower_r used to be `radius + size`, sized as if
+	# the wall were a CIRCLE -- but the wall is a SQUARE ring (the gx/gz loop
+	# above), whose own corner cells reach out to n*size*sqrt(2), well past a
+	# plain `radius + size`. Towers sit on the same 45°/135°/225°/315°
+	# diagonals as those corner cells, so the old radius put a tower's stair
+	# (one more block-width further out again) almost exactly on top of the
+	# wall's own corner column -- real overlapping geometry, not just a close
+	# call. tower_r is now measured from the wall's ACTUAL corner radius, so
+	# neither the tower nor its stair can ever coincide with it.
+	var wall_corner_r: float = float(n) * size * sqrt(2.0)
+	var tower_r := wall_corner_r + size
 	for i in range(4):
 		var ang := PI * 0.25 + TAU * float(i) / 4.0
 		var tx := cos(ang) * tower_r
 		var tz := sin(ang) * tower_r
 		for course in range(4):
 			segs.append({"kind": "block", "pos": Vector3(tx, 1.0 + course * 2.0, tz)})
-		# STAIR + ROOF (2026-07-20): each tower gets a real approach (a
-		# climbable stair pressed against its inward face, one per course so
-		# the whole climb is walkable) and a genuine roofline capping it,
-		# instead of standing there as a bare stack of cubes. tx*0.85/tz*0.85
-		# hugs the stair against the tower's inward face rather than floating
-		# out in open ground.
+		# STAIR + ROOF (2026-07-20): each tower gets a real climbable approach
+		# and a genuine roofline capping it, instead of standing there as a
+		# bare stack of cubes.
+		#
+		# BUG FIX (2026-07-21): the first version placed stairs at 0.85 of the
+		# tower's OWN radius -- i.e. INSIDE it, less than one block-width from
+		# the tower's own column -- so the stair and the tower physically
+		# overlapped. Visually that read as broken/overlapping geometry, which
+		# is what got reported as "building isn't working" even though every
+		# piece was placing successfully. Fixed by placing the stair a full
+		# block-width OUTSIDE the tower (stair_r = tower_r + FULL_SIZE) so the
+		# two never occupy the same space, oriented (yaw) to face back toward
+		# the tower it climbs, and sized SMALL -- a finer, narrower step
+		# instead of a full-width block wedge.
+		var stair_r: float = tower_r + BuildPieceScript.FULL_SIZE
+		var sx := cos(ang) * stair_r
+		var sz := sin(ang) * stair_r
 		for course in range(4):
-			segs.append({"kind": "stair", "pos": Vector3(tx * 0.85, 1.0 + course * 2.0, tz * 0.85)})
-		segs.append({"kind": "roof", "pos": Vector3(tx, 1.0 + 4 * 2.0, tz)})
+			segs.append({"kind": "stair", "pos": Vector3(sx, 1.0 + course * 2.0, sz),
+				"yaw": ang + PI, "scale": BuildPieceScript.SCALE_SMALL})
+		segs.append({"kind": "roof", "pos": Vector3(tx, 1.0 + 4 * 2.0, tz), "yaw": ang})
 	# FINE-DETAIL CORNERS (2026-07-20): the smaller building unit gets real
 	# use here -- a half-size piece tucked into each gate's inner corner,
 	# the kind of fine-tuning the coarse 2.0-unit wall grid can't place.
 	for ga in gate_angles:
 		var gx := cos(float(ga)) * (radius - size * 0.5)
 		var gz := sin(float(ga)) * (radius - size * 0.5)
-		segs.append({"kind": "small", "pos": Vector3(gx, 1.0, gz)})
+		segs.append({"kind": "small", "pos": Vector3(gx, 1.0, gz), "yaw": float(ga)})
 	return segs
 
 # ═════════════════════════════════════════════════════════════════════════════
