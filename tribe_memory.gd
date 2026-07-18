@@ -151,10 +151,29 @@ func get_emotional(agent: String, n: int = 3) -> Array:
 ## genuinely repeated event if it's truly the only recent memory.
 var _last_context_type: Dictionary = {}   # "agent:about" -> event_type string
 
+## SELF-LOOP GUARD (2026-07-17): a talked/heard memory from the last
+## CONVO_ECHO_WINDOW seconds is an echo of the CURRENT live exchange, not a
+## distinct recollection -- excluded from context_for()'s candidate pools
+## entirely. Caught live: the type-variety guard above swapped away from a
+## repeated "fed" memory, but landed on the NPC's own most recent reply --
+## which was itself about the same feed, since it's a record of what she
+## just said. Type-diversity alone doesn't help when the alternate-typed
+## memory is a self-referential echo of the very thing being avoided; this
+## closes that loop at the source instead. Genuinely OLDER talked/heard
+## memories (a real past conversation, not this one's own tail) stay fully
+## eligible -- only the live exchange's own recent turns are screened out.
+const CONVO_ECHO_WINDOW := 90.0
+
+func _is_convo_echo(m: Dictionary) -> bool:
+	if m["type"] != "talked" and m["type"] != "heard":
+		return false
+	return (Time.get_ticks_msec() / 1000.0) - float(m["t"]) < CONVO_ECHO_WINDOW
+
 func context_for(agent: String, about: String = "", n: int = 4) -> String:
 	var picks: Array = []
 	if about != "":
-		var about_mem: Array = get_memories_about(agent, about)
+		var about_mem: Array = (get_memories_about(agent, about) as Array) \
+			.filter(func(m): return not _is_convo_echo(m))
 		var recent_about: Array = about_mem.slice(maxi(0, about_mem.size() - n), about_mem.size())
 		recent_about.reverse()   # most recent first -- this is what should dominate
 		var key: String = agent + ":" + about
@@ -170,20 +189,23 @@ func context_for(agent: String, about: String = "", n: int = 4) -> String:
 		if not picks.is_empty():
 			_last_context_type[key] = picks[0]["type"]
 		# fill remaining slots with the member's broader recent/emotional life,
-		# skipping anything already picked so the two halves don't duplicate
+		# skipping anything already picked so the two halves don't duplicate.
+		# Fetches a wider pool (n*3) BEFORE filtering echoes so the filter
+		# doesn't starve real content down to nothing.
 		var picked_summaries: Array = []
 		for m in picks:
 			picked_summaries.append(m["summary"])
-		var wider: Array = get_emotional(agent, n)
+		var wider: Array = (get_emotional(agent, n * 3) as Array) \
+			.filter(func(m): return not _is_convo_echo(m))
 		for m in wider:
 			if picks.size() >= n:
 				break
 			if not picked_summaries.has(m["summary"]):
 				picks.append(m)
 	if picks.is_empty():
-		picks = get_emotional(agent, n)
+		picks = (get_emotional(agent, n * 3) as Array).filter(func(m): return not _is_convo_echo(m))
 	if picks.is_empty():
-		picks = get_recent(agent, n)
+		picks = (get_recent(agent, n * 3) as Array).filter(func(m): return not _is_convo_echo(m))
 	if picks.is_empty():
 		return "You have no strong memories yet."
 	var lines: Array[String] = []
