@@ -1339,19 +1339,59 @@ func on_member_died(m) -> void:
 # ═════════════════════════════════════════════════════════════════════════════
 # SCOUTING
 # ═════════════════════════════════════════════════════════════════════════════
+# COMMUNICATION (2026-07-28): a real, direct way for the player to build
+# player_opinion with a specific rival tribe -- distinct from the existing
+# passive trade/raid/war ripple effects (see try_trade_with_tribe() and the
+# war-outcome ripples below). Reuses the scout action: an undiscovered camp
+# in range is scouted as before (first contact always counts as a
+# greeting too), but once nothing new is left to discover, the SAME action
+# greets an already-known tribe within reach instead -- so it keeps being a
+# meaningful thing to do long after the map's fully scouted, not a
+# one-time-per-tribe interaction that goes dead.
+const GREET_RANGE := 14.0
+const GREET_OPINION_GAIN := 0.06
+const GREET_COOLDOWN := 40.0
+var _last_greet: Dictionary = {}   # tribe_name -> Time.get_ticks_msec()/1000.0
+
 func player_scout(from_pos: Vector3) -> void:
-	var t = _nearest_tribe_from(from_pos, false)
-	if t == null:
-		_flash("No unknown camps remain.")
+	var undiscovered = _nearest_tribe_from(from_pos, false)
+	if undiscovered != null and from_pos.distance_to(undiscovered.global_position) <= SCOUT_RANGE:
+		undiscovered.discover()
+		var line: String = undiscovered.greeting() if undiscovered.has_method("greeting") else ""
+		notify_cat(CAT_YOU, "You scouted the %s — %s, strength %d.%s" % [
+			undiscovered.tribe_name, undiscovered.archetype, undiscovered.strength,
+			"\n\"%s\"" % line if line != "" else ""])
+		_greet_tribe(undiscovered, true)
 		return
-	if from_pos.distance_to(t.global_position) > SCOUT_RANGE:
-		_flash("Too far to scout — walk within %d of a camp." % int(SCOUT_RANGE))
+	var known = _nearest_tribe_from(from_pos, true)
+	if known != null and from_pos.distance_to(known.global_position) <= GREET_RANGE:
+		_greet_tribe(known)
 		return
-	t.discover()
-	var line: String = t.greeting() if t.has_method("greeting") else ""
-	_flash("You scouted the %s — %s, strength %d.%s" % [
-		t.tribe_name, t.archetype, t.strength,
-		"\n\"%s\"" % line if line != "" else ""])
+	if undiscovered == null and known == null:
+		notify_cat(CAT_YOU, "No tribes to scout or greet nearby.")
+	else:
+		notify_cat(CAT_YOU, "Too far — walk within %d of a camp to scout or greet it." \
+			% int(maxf(SCOUT_RANGE, GREET_RANGE)))
+
+## Real, mechanical communication: nudges player_opinion up a small amount.
+## `is_first_contact` (a fresh scout) always lands, bypassing the cooldown --
+## first impressions matter and shouldn't be swallowed by a timer that
+## hasn't started yet. Repeat greetings of an already-known tribe are
+## cooldown-gated so this can't be spammed into an instant alliance.
+func _greet_tribe(t, is_first_contact: bool = false) -> void:
+	if t == null or not is_instance_valid(t):
+		return
+	var now := Time.get_ticks_msec() / 1000.0
+	var last: float = float(_last_greet.get(t.tribe_name, -999.0))
+	if not is_first_contact and now - last < GREET_COOLDOWN:
+		notify_cat(CAT_YOU, "The %s have nothing new to say -- give it time." % t.tribe_name)
+		return
+	_last_greet[t.tribe_name] = now
+	if "player_opinion" in t:
+		t.player_opinion = clampf(float(t.player_opinion) + GREET_OPINION_GAIN, -1.0, 1.0)
+	if not is_first_contact:
+		var line: String = t.greeting() if t.has_method("greeting") else ""
+		notify_cat(CAT_YOU, "You greet the %s.%s" % [t.tribe_name, "\n\"%s\"" % line if line != "" else ""])
 
 func nearest_undiscovered_camp(from_pos: Vector3):
 	return _nearest_tribe_from(from_pos, false)

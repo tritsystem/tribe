@@ -582,7 +582,15 @@ func _find_intruder() -> Node3D:
 			if po != null:
 				opinion = float(po)
 		var friendly: bool = opinion >= 0.3          # they like him -- don't jump him
-		var in_territory: bool = home.distance_to(p.global_position) < territory
+		# COEXISTENCE (2026-07-28): in_territory used to count as intrusion
+		# UNCONDITIONALLY, regardless of opinion -- so even a "bonded" tribe
+		# (opinion 0.7+, their own leader greeting you warmly) still treated
+		# you setting foot in their camp as a threat to repel. That's the
+		# concrete thing blocking "living amongst other tribes": there was no
+		# opinion level at which a rival camp was actually safe to walk
+		# through. A friendly-or-better relationship now means their own
+		# territory genuinely stops being hostile ground.
+		var in_territory: bool = home.distance_to(p.global_position) < territory and not friendly
 		var too_close: bool = dp < 6.0 and not friendly
 		var hostile_to_player: bool = _raid_player or opinion <= -0.3
 		if (in_territory or too_close or hostile_to_player) and dp < bd:
@@ -605,16 +613,28 @@ func _find_intruder() -> Node3D:
 	# the player's own loyal members AND loyal dogs (both in group "tribe")
 	# count as intruders too if they wander into our territory — dogs are
 	# now real targets, not just something raiders happen to bump into
-	# during a siege
-	for o in SpatialGrid.query(global_position, bd, "tribe"):
-		var tn := o as Node3D
-		if tn == null or not is_instance_valid(tn):
-			continue
-		if home.distance_to(tn.global_position) < territory:
-			var d2 := global_position.distance_to(tn.global_position)
-			if d2 < bd:
-				bd = d2
-				best = tn
+	# during a siege.
+	#
+	# COEXISTENCE (2026-07-28): this scan had no opinion gate at all -- a
+	# player's own tribemates were treated as intruders in a rival camp
+	# regardless of how good relations with the player were. Reuses the same
+	# `friendly` opinion this function already computed for the player
+	# himself: a tribe that welcomes the leader welcomes his people too.
+	var member_friendly: bool = false
+	if tribe != null and is_instance_valid(tribe):
+		var po2 = tribe.get("player_opinion")
+		if po2 != null:
+			member_friendly = float(po2) >= 0.3
+	if not member_friendly:
+		for o in SpatialGrid.query(global_position, bd, "tribe"):
+			var tn := o as Node3D
+			if tn == null or not is_instance_valid(tn):
+				continue
+			if home.distance_to(tn.global_position) < territory:
+				var d2 := global_position.distance_to(tn.global_position)
+				if d2 < bd:
+					bd = d2
+					best = tn
 	return best
 
 func _wander(delta: float) -> void:
