@@ -1942,41 +1942,66 @@ func _is_claimed(n: Node3D) -> bool:
 ## returns null and the caller falls to _begin_fallback(), which now SEARCHES
 ## outward instead of idling (see below) -- that's the intended fallback,
 ## not a bug to route around by silently widening the search radius here.
+## PERF FIX (2026-07-25): _is_claimed() was checked BEFORE the distance
+## filter -- so with tree_count/bush_count/animal_count scaled up for a big
+## world (e.g. 1700 trees), every single candidate in the group ran a full
+## O(roster) claim-scan (a fresh get_nodes_in_group("tribe") call apiece)
+## even for candidates far outside sight that the cheap distance check
+## would have thrown out anyway. A real, measured contributor to reported
+## lag: up to N_group * O(roster) group-lookups per job assignment, called
+## every few seconds per idle member. Distance/sight/best-so-far are now
+## checked FIRST (cheap, local math, no group lookup); _is_claimed() only
+## runs on a candidate that has already cleared all of those -- for a
+## typical camp that's a handful of calls per pick, not one per tree.
 func _nearest_food_source() -> Node3D:
 	var best: Node3D = null
 	var bd := INF
+	var sight := _effective_sight()
 	for b in get_tree().get_nodes_in_group("food_source"):
 		var n := b as Node3D
-		if n and is_instance_valid(n) and n.has_method("harvest") and float(n.amount) >= 1.0 \
-				and not _is_claimed(n):
-			var d := global_position.distance_to(n.global_position)
-			if d <= _effective_sight() and d < bd:
-				bd = d
-				best = n
+		if n == null or not is_instance_valid(n) or not n.has_method("harvest") or float(n.amount) < 1.0:
+			continue
+		var d := global_position.distance_to(n.global_position)
+		if d > sight or d >= bd:
+			continue
+		if _is_claimed(n):
+			continue
+		bd = d
+		best = n
 	return best
 
 func _nearest_animal() -> Node3D:
 	var best: Node3D = null
 	var bd := INF
+	var sight := _effective_sight()
 	for a in get_tree().get_nodes_in_group("animal"):
 		var n := a as Node3D
-		if n and is_instance_valid(n) and not _is_claimed(n):
-			var d := global_position.distance_to(n.global_position)
-			if d <= _effective_sight() and d < bd:
-				bd = d
-				best = n
+		if n == null or not is_instance_valid(n):
+			continue
+		var d := global_position.distance_to(n.global_position)
+		if d > sight or d >= bd:
+			continue
+		if _is_claimed(n):
+			continue
+		bd = d
+		best = n
 	return best
 
 func _nearest_neutral() -> Node3D:
 	var best: Node3D = null
 	var bd := INF
+	var sight := _effective_sight()
 	for n in get_tree().get_nodes_in_group("neutral"):
 		var nn := n as Node3D
-		if nn and is_instance_valid(nn) and not _is_claimed(nn):
-			var d := global_position.distance_to(nn.global_position)
-			if d <= _effective_sight() and d < bd:
-				bd = d
-				best = nn
+		if nn == null or not is_instance_valid(nn):
+			continue
+		var d := global_position.distance_to(nn.global_position)
+		if d > sight or d >= bd:
+			continue
+		if _is_claimed(nn):
+			continue
+		bd = d
+		best = nn
 	return best
 
 # spend tribe food to win over the wanderer we walked up to. If the food
@@ -2003,13 +2028,21 @@ func _do_recruit() -> void:
 func _nearest_tree() -> Node3D:
 	var best: Node3D = null
 	var bd := INF
+	var sight := _effective_sight()
+	# tree_count can be in the THOUSANDS on a big world -- see the perf-fix
+	# comment on _nearest_food_source() above; the same cheap-first ordering
+	# matters even more here.
 	for t in get_tree().get_nodes_in_group("tree"):
 		var n := t as Node3D
-		if n and is_instance_valid(n) and n.has_method("chop") and not _is_claimed(n):
-			var d := global_position.distance_to(n.global_position)
-			if d <= _effective_sight() and d < bd:
-				bd = d
-				best = n
+		if n == null or not is_instance_valid(n) or not n.has_method("chop"):
+			continue
+		var d := global_position.distance_to(n.global_position)
+		if d > sight or d >= bd:
+			continue
+		if _is_claimed(n):
+			continue
+		bd = d
+		best = n
 	return best
 
 func _retarget() -> Node3D:
