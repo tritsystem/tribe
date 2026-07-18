@@ -277,8 +277,19 @@ func set_standing(job: String, target: int) -> void:
 	_standing_target = target
 	_standing_done = 0
 	_think("Orders: %s%s." % [job, (" x%d" % target) if target > 0 else " (until told)"], 2.5)
+	# BUG FIXED (2026-07-17): orders given through this numeric-key path
+	# (_apply_command() -> set_standing(), and the [P] work-plan crew
+	# assignment) never became a memory at all -- only orders typed/spoken
+	# through TribeCommand's natural-language path did (_do_order()'s own
+	# "ordered"/"refused" entries). Every real action should leave a real
+	# trace this member's own memory (and therefore the LLM) can draw on.
+	TribeMemory.remember(member_name, "ordered", "You",
+		"You told me to %s%s." % [job, (" (%d)" % target) if target > 0 else ""],
+		"neutral", 0.0)
 
 func clear_standing() -> void:
+	TribeMemory.remember(member_name, "ordered", "You",
+		"You told me to go back to working things out for myself.", "neutral", 0.0)
 	_standing_job = ""
 	_standing_target = 0
 	_standing_done = 0
@@ -293,6 +304,9 @@ var _task_wood: int = 0
 var _build_plan: Array = []
 var _build_i: int = 0
 var _club_model: MeshInstance3D = null
+var _armor_model: MeshInstance3D = null
+var _visual_weapon: int = -1   # last tier the weapon mesh was built for; -1 forces first build
+var _visual_armor: int = -1    # same for armor
 var _hp_bar: Label3D = null
 var _sel_mark: MeshInstance3D = null
 
@@ -437,14 +451,16 @@ func _animate_body(delta: float) -> void:
 
 func _build_combat_visuals() -> void:
 	_club_model = MeshInstance3D.new()
-	var clm := BoxMesh.new()
-	clm.size = Vector3(0.1, 0.1, 0.8)
-	_club_model.mesh = clm
 	_club_model.position = Vector3(0.35, 1.05, 0.3)
-	_club_model.rotation_degrees = Vector3(55, 0, 0)
-	_club_model.material_override = MatCache.flat(Color(0.45, 0.30, 0.15))
 	_club_model.visible = false
 	add_child(_club_model)
+	_update_weapon_visual()   # builds the tier-0 (Club) mesh immediately
+
+	_armor_model = MeshInstance3D.new()
+	_armor_model.position = Vector3(0, 1.15, 0)
+	_armor_model.visible = false
+	add_child(_armor_model)
+	_update_armor_visual()    # tier 0 (None) stays hidden
 
 	_hp_bar = Label3D.new()
 	_hp_bar.position = Vector3(0, 2.25, 0)
@@ -472,6 +488,10 @@ func _update_combat_visuals() -> void:
 	if _club_model:
 		# you can SEE who's armed: backers carry a club whenever the rack has one
 		_club_model.visible = is_backing_you and manager != null and manager.has_method("clubs_available") and manager.clubs > 0
+		if weapon != _visual_weapon:
+			_update_weapon_visual()
+	if _armor_model and armor != _visual_armor:
+		_update_armor_visual()
 	if _sel_mark:
 		var in_group: bool = manager != null and "selected_group" in manager and self in manager.selected_group
 		_sel_mark.visible = (manager != null and manager.selected_member == self) or in_group
@@ -482,6 +502,71 @@ func _update_combat_visuals() -> void:
 			_hp_bar.modulate = Color(1.0, 0.3, 0.3).lerp(Color(0.4, 1.0, 0.4), hp / max_hp)
 		else:
 			_hp_bar.visible = false
+
+## Real visual per weapon tier, not just the one generic brown stick every
+## tier used to render as. Primitive meshes only, matching this project's
+## existing style everywhere else (no imported models/sprites anywhere in
+## the codebase) -- shape, size, AND color all differ per tier so they read
+## as genuinely different weapons at a glance, not just a recolor.
+func _update_weapon_visual() -> void:
+	_visual_weapon = weapon
+	var mesh: Mesh
+	var mat: StandardMaterial3D
+	var rot := Vector3(55, 0, 0)
+	match weapon:
+		1:  # Spear -- long, thin, pale wood shaft
+			var cyl := CylinderMesh.new()
+			cyl.top_radius = 0.03
+			cyl.bottom_radius = 0.03
+			cyl.height = 1.3
+			mesh = cyl
+			mat = MatCache.flat(Color(0.62, 0.56, 0.42))
+		2:  # Bow -- a squashed ring read edge-on as a curved bow silhouette
+			var tor := TorusMesh.new()
+			tor.inner_radius = 0.22
+			tor.outer_radius = 0.27
+			mesh = tor
+			mat = MatCache.flat(Color(0.35, 0.22, 0.12))
+			rot = Vector3(0, 0, 90)
+		3:  # Axe -- wide, flat, metallic head instead of a slim shaft
+			var box := BoxMesh.new()
+			box.size = Vector3(0.34, 0.06, 0.30)
+			mesh = box
+			mat = MatCache.flat(Color(0.6, 0.62, 0.66), 0.4, 0.6)
+		_:  # Club (0, and any unrecognised tier) -- the original plain stick
+			var clm := BoxMesh.new()
+			clm.size = Vector3(0.1, 0.1, 0.8)
+			mesh = clm
+			mat = MatCache.flat(Color(0.45, 0.30, 0.15))
+	_club_model.mesh = mesh
+	_club_model.material_override = mat
+	_club_model.rotation_degrees = rot
+	if weapon == 2:
+		_club_model.scale = Vector3(0.45, 1.0, 1.0)   # squash the torus into a bow curve
+	else:
+		_club_model.scale = Vector3.ONE
+
+## Real visual per armor tier -- previously armor had NO visual at all despite
+## having real stat effects (armor_reduction()). A flattened chest-mounted
+## box, colored per tier; None stays hidden since there's nothing to show.
+func _update_armor_visual() -> void:
+	_visual_armor = armor
+	if armor <= 0:
+		_armor_model.visible = false
+		return
+	_armor_model.visible = true
+	var mat: StandardMaterial3D
+	match armor:
+		2:  # Bone -- pale, bleached plates
+			mat = MatCache.flat(Color(0.85, 0.80, 0.70))
+		3:  # Metal -- real sheen, the top-tier protection actually looks like it
+			mat = MatCache.flat(Color(0.55, 0.57, 0.60), 0.3, 0.7)
+		_:  # Hide (1, and any unrecognised positive tier) -- plain tanned leather
+			mat = MatCache.flat(Color(0.50, 0.36, 0.22))
+	var box := BoxMesh.new()
+	box.size = Vector3(0.42, 0.5, 0.26)
+	_armor_model.mesh = box
+	_armor_model.material_override = mat
 
 func take_hit(dmg: float, attacker) -> void:
 	dmg *= (1.0 - armor_reduction())   # armor soaks part of the blow
@@ -554,26 +639,47 @@ func _nearby_rival_count() -> int:
 # shape adapted to this game's radii/units -- physically-grounded intensity
 # falloff, not a threshold trigger, same as the real sensor array.
 func _sense_environment() -> void:
+	# VISION/HEARING AS REAL MEMORY (2026-07-17): previously these were live
+	# brain state ONLY -- real for brain_snapshot() to report in the instant,
+	# but nothing an NPC could ever recall in conversation a minute later,
+	# unlike every other real event in this file (fed/betrayed/ordered/...).
+	# Written only on a TRUE transition (not-seeing -> seeing), not every
+	# 1.5s poll while something stays in range -- one sighting is one memory,
+	# same as a person doesn't form a new memory every second they keep
+	# looking at the same thing. Coalescing (see TribeMemory.remember())
+	# still folds repeated sightings within its window into one entry.
+	var was_seeing_raider := sees_raider
 	var raider_d := _nearest_distance("npc", SIGHT_RADIUS, true)
 	sees_raider = raider_d >= 0.0
 	if sees_raider:
 		brain.stimulate("SawRaider", _proximity_drive(raider_d, SIGHT_RADIUS))
+		if not was_seeing_raider:
+			TribeMemory.remember(member_name, "saw_raider", "You",
+				"I spotted a rival tribesperson nearby.", "wary", 0.0)
 
+	var was_seeing_prey := sees_prey
 	var prey_d := _nearest_distance("animal", SIGHT_RADIUS, false)
 	sees_prey = prey_d >= 0.0
 	if sees_prey:
 		brain.stimulate("SawPrey", _proximity_drive(prey_d, SIGHT_RADIUS))
+		if not was_seeing_prey:
+			TribeMemory.remember(member_name, "saw_prey", "You",
+				"I spotted game nearby -- good hunting grounds.", "neutral", 0.0)
 
 	# HEARD is deliberately "within hearing but NOT already seen" -- otherwise
 	# a raider standing right next to you would double-stimulate both SawRaider
 	# and HeardDanger for the same single real event, which isn't two things
 	# happening, it's one thing described twice.
+	var was_hearing_danger := hears_danger
 	hears_danger = false
 	if not sees_raider:
 		var heard_d := _nearest_distance("npc", HEARING_RADIUS, true)
 		hears_danger = heard_d >= 0.0
 		if hears_danger:
 			brain.stimulate("HeardDanger", _proximity_drive(heard_d, HEARING_RADIUS))
+			if not was_hearing_danger:
+				TribeMemory.remember(member_name, "heard_danger", "You",
+					"I heard signs of a rival nearby, though I couldn't see them.", "wary", 0.0)
 
 ## Closest matching entity's distance within `radius`, or -1.0 if none.
 ## `rivals_only` filters to non-neutral (hostile) members of the group --
@@ -634,6 +740,10 @@ func _hear_combat(distance: float) -> void:
 		return
 	hears_danger = true
 	brain.stimulate("HeardDanger", _proximity_drive(distance, HEARING_RADIUS))
+	# already event-based (called once per real hit landed, not polled), so
+	# unlike _sense_environment()'s transition-gating this can log every time
+	TribeMemory.remember(member_name, "heard_danger", "You",
+		"I heard a fight break out nearby.", "wary", 0.0)
 
 # the nearest actual threat to the camp — a raider actively sieging the base,
 # or anyone already at war, within reach of the stockpile. Deliberately NOT
@@ -962,6 +1072,8 @@ var _build_stride: int = 1
 func begin_build(offset: int = 0, stride: int = 1) -> void:
 	if manager == null or not manager.has_method("fence_ring_plan"):
 		return
+	TribeMemory.remember(member_name, "ordered", "You",
+		"You told me to help raise the palisade.", "neutral", 0.0)
 	is_busy = true
 	_task_kind = "build"
 	_task_paid = false
