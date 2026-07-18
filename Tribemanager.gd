@@ -674,6 +674,161 @@ func least_populated_outpost(exclude_near: Vector3):
 			best = o
 	return best
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PERSISTENCE — the manager owns its own state shape; TribePersist owns the file,
+# the timing, and the offline catch-up. Keeping the serialisation HERE means the
+# save format can't fall out of sync with what the fields actually are.
+# ─────────────────────────────────────────────────────────────────────────────
+func capture_state() -> Dictionary:
+	var tribes: Array = []
+	for t in world_tribes:
+		if not is_instance_valid(t):
+			continue
+		tribes.append({
+			"name": t.tribe_name, "archetype": t.archetype,
+			"x": t.global_position.x, "z": t.global_position.z,
+			"food": t.food, "material": t.material_stock, "wood": t.wood,
+			"strength": t.strength, "members": t.member_count,
+			"defeated": t.defeated,
+			"traits": t.leader_traits.duplicate(),
+			"opinions": t.opinions.duplicate(),
+			"bonds": t.bonds.duplicate(),
+			# BUG FIX (2026-08-02): player_opinion was never saved at all --
+			# every relationship built through greeting/trade/coexistence
+			# reset to 0 (neutral) on reload, undoing real diplomatic
+			# progress silently. Reported live as "it all disappeared and
+			# restarted".
+			"player_opinion": t.player_opinion,
+		})
+	var outpost_list: Array = []
+	for o in outposts:
+		if is_instance_valid(o):
+			outpost_list.append({
+				"name": str(o.get("settlement_name")), "district": str(o.get("district")),
+				"x": (o as Node3D).global_position.x, "z": (o as Node3D).global_position.z,
+			})
+	var mem_list: Array = []
+	for m in members:
+		if is_instance_valid(m) and "member_name" in m:
+			mem_list.append({
+				"name": str(m.get("member_name")),
+				"personality": str(m.get("personality")),
+				"relationship": float(m.get("relationship")),
+			})
+	var pl := get_tree().get_first_node_in_group("player") as Node3D
+	return {
+		"food": food, "materials": materials, "wood": wood, "unrest": unrest,
+		"materials_owned": materials_owned.duplicate(),
+		"player_x": pl.global_position.x if pl else 0.0,
+		"player_z": pl.global_position.z if pl else 0.0,
+		"tribes": tribes, "members": mem_list,
+		"season": _season,
+		# BUG FIX (2026-08-02): none of this was saved either -- a built
+		# fortress' TIER (and the material it was upgraded to) and any
+		# founded settlements vanished on every reload even though the
+		# economy numbers above carried over fine. Reported live as a built
+		# castle "disappearing and restarting". The physical blocks
+		# themselves still aren't restored (an honest, separate limitation --
+		# see apply_state()'s own comment), but restoring fortress_tier means
+		# the next autonomous build re-raises the SAME tier's ring instead of
+		# starting over from tier 0, and restoring outposts fully rebuilds
+		# each settlement's real structures.
+		"fortress_tier": fortress_tier,
+		"material_tier": material_tier,
+		"current_weather": current_weather,
+		"outposts": outpost_list,
+	}
+
+## Overwrite the freshly-spawned world with saved state. Tribes are matched by
+## name (spawn order isn't guaranteed stable); a saved tribe that's since
+## defeated is marked so rather than resurrected.
+func apply_state(d: Dictionary) -> void:
+	food = int(d.get("food", food))
+	materials = int(d.get("materials", materials))
+	wood = int(d.get("wood", wood))
+	unrest = float(d.get("unrest", unrest))
+	if d.has("materials_owned"):
+		materials_owned = (d["materials_owned"] as Dictionary).duplicate()
+	_season = str(d.get("season", "fair"))
+	# BUG FIX (2026-08-02): restore what a built fortress/city actually
+	# depends on -- see capture_state()'s own comment on why this was
+	# missing (reported as a castle "disappearing and restarting"). Reading
+	# these back means the NEXT autonomous build re-raises the SAME tier's
+	# ring (fence_ring_plan() reads fortress_tier directly) instead of
+	# starting over from tier 0.
+	fortress_tier = int(d.get("fortress_tier", fortress_tier))
+	fortress_built = fortress_tier > 0
+	material_tier = int(d.get("material_tier", material_tier))
+	current_weather = int(d.get("current_weather", current_weather))
+
+	var by_name: Dictionary = {}
+	for t in world_tribes:
+		if is_instance_valid(t):
+			by_name[t.tribe_name] = t
+	for ts in d.get("tribes", []):
+		var t = by_name.get(str(ts["name"]))
+		if t == null:
+			continue
+		# re-sample ground Y at the saved x,z: a save made on the old flat world
+		# (or before terrain regenerated) would otherwise drop the camp at y=1,
+		# floating over valleys or buried in hills. Always sit it on the surface.
+		var tx: float = float(ts["x"])
+		var tz: float = float(ts["z"])
+		t.global_position = Vector3(tx, ground_y(tx, tz), tz)
+		t.food = int(ts["food"])
+		t.material_stock = int(ts["material"])
+		t.wood = int(ts.get("wood", 0))
+		t.strength = int(ts["strength"])
+		t.member_count = int(ts["members"])
+		t.leader_traits = (ts["traits"] as Dictionary).duplicate()
+		t.opinions = (ts["opinions"] as Dictionary).duplicate()
+		t.bonds = (ts.get("bonds", {}) as Dictionary).duplicate()
+		# BUG FIX (2026-08-02): player_opinion (built via greeting/trade/
+		# coexistence -- see Tribemanager._greet_tribe(), the whole point of
+		# this session's diplomacy work) was never restored, silently
+		# resetting every relationship to neutral on reload.
+		if "player_opinion" in ts:
+			t.player_opinion = float(ts["player_opinion"])
+		if bool(ts.get("defeated", false)) and t.has_method("defeat"):
+			t.defeat()
+
+	# BUG FIX (2026-08-02): founded settlements (name, district, position)
+	# vanished on reload along with everything else -- rebuild each one's
+	# real stockpile + structures. HONEST LIMITATION: this restores the
+	# settlement itself, not every individual block a member may have added
+	# to it since founding (those, like the home fortress' own blocks, are
+	# not yet tracked for persistence at all).
+	outposts.clear()
+	for os in d.get("outposts", []):
+		var ox: float = float(os.get("x", 0.0))
+		var oz: float = float(os.get("z", 0.0))
+		var opos := Vector3(ox, ground_y(ox, oz), oz)
+		var sp := Node3D.new()
+		sp.name = "OutpostStockpile"
+		sp.set_script(load("res://stockpile.gd"))
+		add_child(sp)
+		sp.global_position = opos
+		sp.set("manager", self)
+		sp.set("settlement_name", str(os.get("name", "")))
+		sp.set("district", str(os.get("district", "")))
+		sp.remove_from_group("stockpile")
+		sp.add_to_group("outpost_stockpile")
+		outposts.append(sp)
+		_build_district_structures(str(os.get("district", "")), opos)
+
+	# restore named members' bonds (they respawn generically on _start_game; here
+	# we re-apply who they were and how they felt about you)
+	var saved_members: Array = d.get("members", [])
+	for i in range(mini(members.size(), saved_members.size())):
+		var m = members[i]
+		var sm: Dictionary = saved_members[i]
+		if is_instance_valid(m):
+			if "member_name" in m: m.member_name = str(sm["name"])
+			if "personality" in m: m.personality = str(sm["personality"])
+			if "relationship" in m:
+				m.relationship = float(sm["relationship"])
+				if m.has_method("_update_rank"): m._update_rank()
+
 func _spawn_world() -> void:
 	_spawn_vegetation()
 	for _i in range(bush_count):

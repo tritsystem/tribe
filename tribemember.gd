@@ -1267,7 +1267,14 @@ func _auto_work(delta: float) -> void:
 			return
 	_start_job(manager.suggest_job(self))
 
-const MIGRATE_CHANCE := 0.02   # per idle job-pick, so it's rare but ongoing
+# TUNING (2026-08-02): was 0.02 -- with an idle job-pick roughly every 3-7s,
+# that's an EXPECTED ~4-8 MINUTES before a single member even rolls the
+# check once, let alone finds a valid destination. Reported live as "new
+# features not happening" -- the ability existed but at odds too low to
+# actually surface in a normal play session. Raised to a rate that shows up
+# within a couple of minutes of idle time instead of requiring a long
+# unattended session to ever observe.
+const MIGRATE_CHANCE := 0.08   # per idle job-pick
 
 func _start_migrate(dest: Vector3) -> void:
 	is_busy = true

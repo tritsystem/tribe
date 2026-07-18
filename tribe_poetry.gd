@@ -25,8 +25,15 @@ extends Node
 # small talk), and TribeLLM's own single-flight queue does the rest.
 # ─────────────────────────────────────────────────────────────────────────────
 
-const COMPOSE_INTERVAL := 50.0     # seconds between attempts (global)
-const PER_NPC_COOLDOWN := 240.0    # a member won't compose again this soon
+# TUNING (2026-08-02): was 50.0/240.0 -- reported live as a feature that
+# existed but effectively never surfaced in normal play ("new features not
+# happening"). A 240s per-member cooldown on top of a small roster meant
+# real waits of several minutes between any given member's compositions.
+# Tightened so composing is still a considered act (not idle chatter), but
+# actually shows up within a normal short session instead of requiring one
+# to run for a long time before anyone ever composes anything.
+const COMPOSE_INTERVAL := 30.0     # seconds between attempts (global)
+const PER_NPC_COOLDOWN := 120.0    # a member won't compose again this soon
 const HOLD := 7.0                  # a poem stays up longer than a spoken line
 const DEBUG_POETRY := true         # TEMP: prints why nobody composed this round
 
