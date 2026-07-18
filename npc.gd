@@ -156,6 +156,21 @@ func _ready() -> void:
 	anim = BodyAnim.new()
 	anim.setup([get_node_or_null("Mesh")])
 
+# INDIVIDUAL IDENTITY (2026-07-30): every rival NPC from the same tribe used
+# to share the exact same member_name (the tribe's own name) -- fine while
+# nothing ever addressed one individually, but a real blocker for extending
+# real dialogue (TribeTalk) to rival NPCs: that system keys _last_talk/
+# _speakers by member_name, so two different "Foragers" would silently
+# collide, overwrite each other's cooldowns, and misroute replies. Each
+# rival NPC now gets its own name from this bank (separate from
+# Tribemanager.MEMBER_NAMES so a rival isn't likely to be confused for one
+# of your own members) -- tribe_name/archetype are unaffected and still
+# drive everything that reads them (persona, UI, combat logs).
+const RIVAL_NAMES := [
+	"Sarn", "Ivo", "Rask", "Nera", "Tolek", "Ymir", "Sable", "Corvin",
+	"Alba", "Dresk", "Ottavia", "Quinlen", "Fenrik", "Bryn", "Hesper", "Yara",
+]
+
 func setup(t, h: Vector3, terr: float, col: Color) -> void:
 	tribe = t
 	home = h
@@ -164,7 +179,7 @@ func setup(t, h: Vector3, terr: float, col: Color) -> void:
 	_wander_target = h
 	_job_cd = randf_range(1.0, 4.0)
 	if t:
-		member_name = t.tribe_name
+		member_name = RIVAL_NAMES[randi() % RIVAL_NAMES.size()]
 		personality = t.archetype
 		# HIVE MIND: point at the tribe's one shared brain instead of running
 		# an individual copy — matches spikeling.gd's own design intent

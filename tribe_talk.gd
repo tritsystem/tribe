@@ -70,36 +70,59 @@ func _try_start() -> void:
 	for m in get_tree().get_nodes_in_group("tribe"):
 		if is_instance_valid(m) and _eligible(m):
 			pool.append(m)
-	if pool.size() < 2:
+	if pool.is_empty():
 		if DEBUG_TALK:
-			print("[TALK] only %d eligible member(s) -- need 2 (llm warm=%s)" % [pool.size(), TribeLLM.warm])
+			print("[TALK] no eligible member this round (llm warm=%s)" % TribeLLM.warm)
 		return
 	pool.shuffle()
 	var a = pool[0]
 	var b = null
 	var nearest := 9999.0
+	# CROSS-TRIBE (2026-07-30): only meaningful with 2+ eligible tribemates
+	# nearby, so this loop is skipped entirely when there's just one -- the
+	# rival fallback below still gets a chance regardless of pool size.
 	for cand in pool.slice(1, pool.size()):
 		var d: float = (a as Node3D).global_position.distance_to((cand as Node3D).global_position)
 		nearest = minf(nearest, d)
 		if d <= TALK_RADIUS:
 			b = cand
 			break
+	var cross_tribe := false
+	if b == null:
+		# No tribemate in range (or none besides `a` at all) -- try a nearby
+		# rival NPC instead, but only from a tribe that's genuinely friendly
+		# (the same opinion threshold npc.gd's _find_intruder() now uses to
+		# decide a camp is safe to walk through). Safe to do at all only
+		# because rival NPCs are individually named now (see npc.gd's
+		# RIVAL_NAMES) -- they used to all share their tribe's own name,
+		# which would have collided in _last_talk/_speakers below.
+		b = _find_friendly_rival(a)
+		cross_tribe = b != null
 	if b == null:
 		if DEBUG_TALK:
-			print("[TALK] %d eligible but nearest pair is %.1fm apart (need <=%.0fm)" % [
+			print("[TALK] %d eligible but nearest pair is %.1fm apart (need <=%.0fm), no friendly rival nearby either" % [
 				pool.size(), nearest, TALK_RADIUS])
 		return
 	if DEBUG_TALK:
-		print("[TALK] %s -> %s (%.1fm apart, llm warm=%s)" % [
-			a.get("member_name"), b.get("member_name"),
+		print("[TALK] %s -> %s%s (%.1fm apart, llm warm=%s)" % [
+			a.get("member_name"), b.get("member_name"), " [cross-tribe]" if cross_tribe else "",
 			(a as Node3D).global_position.distance_to((b as Node3D).global_position), TribeLLM.warm])
 
 	var an: String = str(a.get("member_name"))
 	var bn: String = str(b.get("member_name"))
 	_last_talk[an] = _now()
-	_last_talk[bn] = _now()
+	if not cross_tribe:
+		_last_talk[bn] = _now()   # a rival isn't in the "tribe" eligibility pool at all -- nothing to cool down
 	_speakers[an] = a
 	_speakers[bn] = b
+
+	if cross_tribe:
+		var b_tribe = b.get("tribe")
+		var b_tribe_name: String = str(b_tribe.tribe_name) if b_tribe and is_instance_valid(b_tribe) else "a rival clan"
+		TribeLLM.say_as(an, bn, _persona(a), TribeMemory.context_for(an),
+			"You are near a friendly rival, %s of the %s. Say something to them -- greet them, or ask about their clan." % [bn, b_tribe_name],
+			_fallback_open(a, bn), "open:" + bn, roster_string())
+		return
 
 	# GOSSIP takes priority over small talk: if A carries a rumour B hasn't heard,
 	# A passes it on -- RETOLD in A's own words. That retelling becomes the rumour
@@ -134,6 +157,46 @@ func roster_names() -> Array:
 			if n != "" and not names.has(n):
 				names.append(n)
 	return names
+
+## A nearby rival NPC willing to talk -- only from a tribe that's genuinely
+## friendly (opinion >= 0.3, the same threshold npc.gd's own _find_intruder()
+## uses to decide a camp is safe to walk through). Safe to key by
+## member_name at all because rival NPCs are individually named now (see
+## npc.gd's RIVAL_NAMES) -- they used to all share their tribe's own name.
+func _find_friendly_rival(near: Node) -> Node:
+	var best: Node = null
+	var bd := TALK_RADIUS
+	for o in get_tree().get_nodes_in_group("npc"):
+		if not is_instance_valid(o) or o.get("neutral"):
+			continue
+		var t = o.get("tribe")
+		if t == null or not is_instance_valid(t):
+			continue
+		var op = t.get("player_opinion")
+		if op == null or float(op) < 0.3:
+			continue
+		var d: float = (near as Node3D).global_position.distance_to((o as Node3D).global_position)
+		if d <= bd:
+			bd = d
+			best = o
+	return best
+
+## Dispatches to the right persona builder: a real tribemate (has current_rank)
+## uses the full _persona() below; a rival NPC (npc.gd has no such property,
+## no hunger tracking, no brain_snapshot()) gets its own, separate builder --
+## reusing _persona() unmodified for a rival risked float(m.get("hunger"))
+## on a property that plain doesn't exist there.
+func _persona_for(m: Node) -> String:
+	if "current_rank" in m:
+		return _persona(m)
+	return _rival_persona(m)
+
+func _rival_persona(m: Node) -> String:
+	var archetype: String = str(m.get("personality"))
+	var t = m.get("tribe")
+	var tribe_name: String = str(t.tribe_name) if t and is_instance_valid(t) else "a rival clan"
+	return "You belong to the %s, a %s clan. You are currently on good terms with the Leader." \
+		% [tribe_name, archetype]
 
 func _persona(m: Node) -> String:
 	var p: String = str(m.get("personality"))
@@ -172,7 +235,18 @@ func _on_line(speaker: String, listener: String, text: String, tag: String) -> v
 	# say() not _think(): NPC<->NPC dialogue is real speech, so it gets a voice if
 	# you're near enough to overhear. Not forced -- eavesdropping is best-effort,
 	# and a conversation across camp shouldn't cut off your Companion answering you.
-	sp.say(text, HOLD)
+	#
+	# CROSS-TRIBE FIX (2026-07-30): a rival NPC (npc.gd) has no say()/_think()
+	# -- that's a tribemember.gd-only thought-bubble system. Extending
+	# dialogue to rivals without this guard crashed with "Nonexistent
+	# function 'say'" the instant a rival's own reply came back. The
+	# mechanical side (memory, TribeRumor) still happens regardless; only
+	# the above-head text/voice is skipped for a participant that has
+	# nowhere to display it.
+	if sp.has_method("say"):
+		sp.say(text, HOLD)
+	elif DEBUG_TALK:
+		print("[TALK] %s (no speech display): %s" % [speaker, text])
 
 	if tag.begins_with("gossip:"):
 		# A retold the rumour -> that retelling IS the rumour now (drift), B learns
@@ -191,7 +265,7 @@ func _on_line(speaker: String, listener: String, text: String, tag: String) -> v
 		var lb = _speakers.get(listener)
 		if lb == null or not is_instance_valid(lb):
 			return
-		TribeLLM.say_as(listener, speaker, _persona(lb),
+		TribeLLM.say_as(listener, speaker, _persona_for(lb),
 			TribeMemory.context_for(listener, speaker),
 			"%s just said to you: \"%s\". Answer them." % [speaker, text],
 			_fallback_reply(lb), "reply:" + speaker, roster_string())
