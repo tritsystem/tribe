@@ -125,8 +125,38 @@ func get_emotional(agent: String, n: int = 3) -> Array:
 
 ## Compact context string for an LLM prompt. Kept SHORT on purpose: a small local
 ## model degrades fast with a bloated prompt, and this runs per conversation.
+##
+## BUG FIXED (2026-07-17): this used to slice get_memories_about() from the
+## FRONT (picks.slice(0, n)) -- since memories are appended in chronological
+## order, that's the OLDEST n memories about the target, not the most recent.
+## A member fed 12 times kept citing their FIRST feed forever, verbatim, no
+## matter what the player actually just said -- caught live: Wen gave the
+## identical line to "hi wen" and "how are you", because the context fed to
+## the LLM literally never changed as new memories piled up behind it.
+##
+## Also widened beyond "about the target only": half the slots now pull the
+## member's most emotionally significant RECENT memories regardless of who
+## they're about (gossip, bonds with others, work) -- previously a player
+## conversation could only ever surface player-directed memories, so an NPC
+## could never bring up anything else going on in their life.
 func context_for(agent: String, about: String = "", n: int = 4) -> String:
-	var picks: Array = get_memories_about(agent, about) if about != "" else []
+	var picks: Array = []
+	if about != "":
+		var about_mem: Array = get_memories_about(agent, about)
+		var recent_about: Array = about_mem.slice(maxi(0, about_mem.size() - n), about_mem.size())
+		recent_about.reverse()   # most recent first -- this is what should dominate
+		picks.append_array(recent_about.slice(0, mini(n - n / 2, recent_about.size())))
+		# fill remaining slots with the member's broader recent/emotional life,
+		# skipping anything already picked so the two halves don't duplicate
+		var picked_summaries: Array = []
+		for m in picks:
+			picked_summaries.append(m["summary"])
+		var wider: Array = get_emotional(agent, n)
+		for m in wider:
+			if picks.size() >= n:
+				break
+			if not picked_summaries.has(m["summary"]):
+				picks.append(m)
 	if picks.is_empty():
 		picks = get_emotional(agent, n)
 	if picks.is_empty():
