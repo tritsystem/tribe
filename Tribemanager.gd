@@ -122,6 +122,31 @@ const FORTRESS_BASE_RADIUS := 10.0
 const FORTRESS_RADIUS_GROWTH := 4.0
 var fortress_tier: int = 0
 
+# PERF BUG FIX (2026-07-24): each tier used to ADD a whole new, bigger ring
+# on top of the previous one -- the old ring was never removed, so a tribe
+# that reached MAX_FORTRESS_TIER accumulated FOUR overlapping rings' worth
+# of real StaticBody3D+collision nodes (roughly 128+178+196+240 = 742 for
+# this tribe alone), which is a real, measured contributor to "game crashed,
+# its super laggy" once expansion had run a few cycles. fence_ring_plan()
+# now clears the PREVIOUS tier's tracked pieces the moment a NEW tier's
+# plan is actually requested (see _fortress_pieces/_fortress_pieces_tier),
+# so at most one ring's worth of real nodes exists at a time -- the
+# fortress still reads as "keeps growing bigger and better" (each ring IS
+# strictly larger/more elaborate than the last), it just doesn't leave
+# every previous ring standing as dead weight underneath it.
+var _fortress_pieces: Array = []
+var _fortress_pieces_tier: int = -1
+
+func _track_fortress_piece(n) -> void:
+	if n != null and is_instance_valid(n):
+		_fortress_pieces.append(n)
+
+func _clear_fortress_ring() -> void:
+	for n in _fortress_pieces:
+		if is_instance_valid(n):
+			n.queue_free()
+	_fortress_pieces.clear()
+
 const MATERIAL_TIER_NAMES := ["Wood", "Stone", "Metal"]
 # materials needed to REACH that tier index (index 0 is free -- you start in Wood)
 const MATERIAL_UPGRADE_COST := [0, 40, 90]
@@ -844,6 +869,7 @@ func try_build_fence(pos: Vector3, yaw: float, by_player: bool = false) -> bool:
 	f.global_position = pos
 	f.rotation.y      = yaw
 	_flash("Fence raised. (wood left: %d)" % wood)
+	if not by_player: _track_fortress_piece(f)
 	return true
 
 func try_build_teepee(pos: Vector3, by_player: bool = false) -> bool:
@@ -859,6 +885,7 @@ func try_build_teepee(pos: Vector3, by_player: bool = false) -> bool:
 	add_child(t)
 	t.global_position = pos
 	_flash("Teepee raised. (wood left: %d)" % wood)
+	if not by_player: _track_fortress_piece(t)
 	return true
 
 const BlockScript = preload("res://block.gd")
@@ -896,6 +923,7 @@ func try_build_block(pos: Vector3, by_player: bool = false) -> bool:
 	var snapped: Vector3 = BlockScript.snap(pos)
 	snapped.y = seat + pos.y
 	b.global_position = snapped
+	if not by_player: _track_fortress_piece(b)
 	return true
 
 ## Spend real `materials` to unlock the NEXT construction material tier
@@ -1013,6 +1041,7 @@ func try_build_stair(pos: Vector3, yaw: float = 0.0,
 	var snapped: Vector3 = BlockScript.snap(pos)
 	snapped.y = seat + pos.y
 	b.global_position = snapped
+	if not by_player: _track_fortress_piece(b)
 	return true
 
 # A steep triangular-prism cap — reads as an actual roofline, not a flat lid.
@@ -1035,6 +1064,7 @@ func try_build_roof(pos: Vector3, yaw: float = 0.0,
 	var snapped: Vector3 = BlockScript.snap(pos)
 	snapped.y = seat + pos.y
 	b.global_position = snapped
+	if not by_player: _track_fortress_piece(b)
 	return true
 
 # A half-size fine-detail unit — corners, ledges, in-fill that shouldn't be
@@ -1058,6 +1088,7 @@ func try_build_small(pos: Vector3, yaw: float = 0.0,
 	add_child(b)
 	var seat := seat_build(pos.x, pos.z, 1.0)
 	b.global_position = Vector3(pos.x, seat + pos.y, pos.z)
+	if not by_player: _track_fortress_piece(b)
 	return true
 
 # A narrow slab that fills a gate opening — a real door, not just an
@@ -1080,6 +1111,7 @@ func try_build_door(pos: Vector3, yaw: float = 0.0,
 	add_child(b)
 	var seat := seat_build(pos.x, pos.z, 1.0)
 	b.global_position = Vector3(pos.x, seat + pos.y, pos.z)
+	if not by_player: _track_fortress_piece(b)
 	return true
 
 func try_build_camp(pos: Vector3, by_player: bool = false) -> bool:
@@ -2162,6 +2194,12 @@ func _near_gate(ang: float, gate_angles: Array, half_width: float = GATE_HALF_WI
 # rebuilt on top of itself.
 func fence_ring_plan(tier: int = -1) -> Array:
 	var t: int = tier if tier >= 0 else fortress_tier
+	# a NEW tier's plan being requested means the previous ring is about to
+	# be superseded -- clear it now, once, rather than letting it pile up
+	# underneath every ring that follows (see _fortress_pieces' own comment).
+	if t != _fortress_pieces_tier:
+		_clear_fortress_ring()
+		_fortress_pieces_tier = t
 	var radius: float = FORTRESS_BASE_RADIUS + float(t) * FORTRESS_RADIUS_GROWTH
 	var fence_radius: float = radius - 3.0
 
