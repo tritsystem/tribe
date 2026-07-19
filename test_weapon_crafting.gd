@@ -72,6 +72,10 @@ extends Node
 var _has: bool = true
 func spend_materials(n: int) -> bool:
 	return _has
+func spend_materials_at(_pos, n: int) -> bool:
+	return spend_materials(n)
+func crafting_discount_at(_pos) -> float:
+	return 1.0
 """
 	script.reload()
 	var n := Node.new()

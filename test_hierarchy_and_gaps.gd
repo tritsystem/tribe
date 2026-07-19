@@ -65,9 +65,13 @@ func _ready() -> void:
 	crafter.member_name = "Crafter1"
 	crafter.manager = mgr
 	crafter.home_pos = Vector3(-300, 0, 0)
-	var before_mats: int = mgr.materials
+	# per-settlement economies (added after this scenario was first written):
+	# a resident crafts from their OWN settlement's local materials now, not
+	# the shared camp's -- fund the settlement directly rather than mgr.materials.
+	mgr.outposts[1].local_materials = 100
+	var before_mats: int = mgr.outposts[1].local_materials
 	crafter.craft_weapon(1)
-	var spent: int = before_mats - mgr.materials
+	var spent: int = before_mats - mgr.outposts[1].local_materials
 	_check("crafting at the Crafting settlement spends LESS than the base material cost",
 		spent < crafter._GEAR_MAT_COST and spent > 0)
 	crafter.free()

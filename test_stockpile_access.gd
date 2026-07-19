@@ -92,6 +92,8 @@ var _has_food: bool = true
 func spend_food(n: int) -> bool:
 	spend_called = true
 	return _has_food
+func spend_food_at(_pos, n: int) -> bool:
+	return spend_food(n)
 """
 	script.reload()
 	var n := Node.new()

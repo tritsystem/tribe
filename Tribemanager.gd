@@ -707,6 +707,65 @@ func is_outpostman(pos: Vector3) -> bool:
 			return true
 	return false
 
+## The outpost stockpile `pos` is resident at, or null if `pos` isn't at any
+## founded settlement (the main camp, or nowhere).
+func _outpost_at(pos: Vector3):
+	for o in outposts:
+		if is_instance_valid(o) and (o as Node3D).global_position.distance_to(pos) <= RESIDENCE_RADIUS:
+			return o
+	return null
+
+# PER-SETTLEMENT ECONOMIES (2026-08-04): previously flagged as an honest,
+# unimplemented gap ("there is one tribe economy in this codebase, not a
+# per-camp inventory system" -- see found_outpost()'s own scope note when
+# outposts first shipped). A resident (home_pos at a founded outpost) now
+# deposits into and draws from THAT settlement's own local_food/local_wood/
+# local_materials (stockpile.gd) instead of the shared camp economy -- a
+# real, separate stockpile, not just a different display. A non-resident
+# (home_pos not at any outpost, which is everyone before this feature and
+# everyone at the main camp after it) behaves EXACTLY as before through the
+# plain add_food()/spend_food()/etc. these wrap -- nothing about the main
+# camp's own economy changes.
+#
+# SCOPE: this covers a resident's own personal economic actions (gathering/
+# hunting deposits, self-feeding, crafting) -- the clearest, safest slice.
+# Fortress/settlement CONSTRUCTION costs (try_build_*, found_outpost's own
+# material_tier upgrades) still draw from the one shared wood/materials pool
+# regardless of where the builder lives; splitting those too would need
+# building itself to become settlement-aware, a separate, larger change.
+func add_food_at(pos: Vector3, n: int) -> void:
+	var o = _outpost_at(pos)
+	if o: o.local_food += n
+	else: add_food(n)
+
+func add_wood_at(pos: Vector3, n: int) -> void:
+	var o = _outpost_at(pos)
+	if o: o.local_wood += n
+	else: add_wood(n)
+
+func add_materials_at(pos: Vector3, n: int) -> void:
+	var o = _outpost_at(pos)
+	if o: o.local_materials += n
+	else: add_materials(n)
+
+func spend_food_at(pos: Vector3, n: int) -> bool:
+	var o = _outpost_at(pos)
+	if o:
+		if o.local_food >= n:
+			o.local_food -= n
+			return true
+		return false
+	return spend_food(n)
+
+func spend_materials_at(pos: Vector3, n: int) -> bool:
+	var o = _outpost_at(pos)
+	if o:
+		if o.local_materials >= n:
+			o.local_materials -= n
+			return true
+		return false
+	return spend_materials(n)
+
 # MIGRATION (2026-07-31): so a member can find and join an EXISTING
 # settlement instead of only the founder ever living there. Residency is
 # read straight off each member's own home_pos (the same field
@@ -2065,9 +2124,40 @@ func _resolve_war_round(alive: Array) -> void:
 	_flash("⚔ The %s muster %d and march on the %s!" % [
 		aggressor.tribe_name, mustered, defender.tribe_name])
 
+# MUTUAL DEFENSE (2026-08-04): deeper AI-to-AI diplomacy on top of the
+# existing alliance system (trade-built bonds already stop allies raiding
+# each other and shape how they react to a defeat -- see
+# _ripple_opinions_on_defeat()). This closes the remaining real gap: an
+# ally previously never took an attack on its FRIEND personally in the
+# moment it happened, only after the fact if the friend actually fell.
+# Now an ally has a real, non-guaranteed chance to gain its own grudge
+# against the aggressor the instant its friend is attacked -- a mutual
+# defense pact is a real relationship with real solidarity, not just an
+# agreement not to fight each other.
+const MUTUAL_DEFENSE_CHANCE := 0.5
+const MUTUAL_DEFENSE_GRUDGE := 0.2
+
+func _rally_allies_against(aggressor, defender) -> void:
+	if not defender.has_method("allies"):
+		return
+	for ally_name in defender.allies():
+		if str(ally_name) == aggressor.tribe_name:
+			continue   # an "ally" that's also the aggressor isn't a real ally right now
+		for t in world_tribes:
+			if not is_instance_valid(t) or t.defeated or t == aggressor or t == defender:
+				continue
+			if t.tribe_name != ally_name:
+				continue
+			if randf() < MUTUAL_DEFENSE_CHANCE and t.has_method("add_grudge"):
+				t.add_grudge(aggressor.tribe_name, MUTUAL_DEFENSE_GRUDGE)
+				notify_cat(CAT_TRIBES, "🛡 The %s stand by their ally the %s against the %s." % [
+					t.tribe_name, defender.tribe_name, aggressor.tribe_name])
+			break
+
 func _abstract_clash(aggressor, defender) -> void:
 	if not is_instance_valid(aggressor) or not is_instance_valid(defender) or defender.defeated:
 		return
+	_rally_allies_against(aggressor, defender)
 	var a_power := float(aggressor.strength) * randf_range(0.85, 1.30)
 	var d_power := float(defender.strength)  * randf_range(0.85, 1.20)
 	if defender.built: d_power *= 1.25

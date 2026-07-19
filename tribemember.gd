@@ -451,7 +451,7 @@ func set_gear(w: int, a: int) -> void:
 ## comment on ORDER_RISK). Returns false (and does nothing) if materials are
 ## short, same fail-soft discipline as _maybe_upgrade_gear().
 func craft_weapon(tier: int) -> bool:
-	if manager == null or not manager.has_method("spend_materials"):
+	if manager == null or not manager.has_method("spend_materials_at"):
 		return false
 	tier = clampi(tier, 0, WEAPON_TIERS.size() - 1)
 	# DISTRICT BONUS (2026-08-03): a Crafting settlement's workshop genuinely
@@ -459,7 +459,10 @@ func craft_weapon(tier: int) -> bool:
 	var cost: int = _GEAR_MAT_COST
 	if manager.has_method("crafting_discount_at"):
 		cost = maxi(1, int(round(float(_GEAR_MAT_COST) * manager.crafting_discount_at(home_pos))))
-	if not manager.spend_materials(cost):
+	# PER-SETTLEMENT ECONOMIES (2026-08-04): a resident crafts from their own
+	# settlement's local materials (spend_materials_at() falls through to the
+	# original shared spend_materials() for everyone else).
+	if not manager.spend_materials_at(home_pos, cost):
 		_think("Not enough materials to craft that yet.", 2.0)
 		return false
 	weapon = tier
@@ -1476,17 +1479,18 @@ func _hunger_step(delta: float) -> void:
 		inv_food -= 1
 		hunger = maxf(0.0, hunger - EAT_RESTORE)
 	elif hunger >= EAT_AT and current_rank != "Stranger" \
-			and manager and manager.has_method("spend_food"):
+			and manager and manager.has_method("spend_food_at"):
 		# TRUST-GATED STOCKPILE ACCESS (2026-07-17): previously a member's own
 		# ration (inv_food, replenished only by their own gathering) was the
 		# ONLY source of food they could ever draw on -- once it ran dry they
 		# starved regardless of how much you trusted them, and only the
 		# PLAYER could ever touch the shared stockpile. A Stranger hasn't
 		# earned that access; anyone Acquaintance rank or better ("level 1"
-		# trust -- the first real tier above the untrusted default) now can,
-		# the same spend_food() the player's own feeding and FPSPlayer's own
-		# survival already use.
-		if manager.spend_food(1):
+		# trust -- the first real tier above the untrusted default) now can.
+		# PER-SETTLEMENT ECONOMIES (2026-08-04): a resident draws from their
+		# OWN settlement's local stockpile first (spend_food_at() falls
+		# through to the original shared spend_food() for everyone else).
+		if manager.spend_food_at(home_pos, 1):
 			hunger = maxf(0.0, hunger - EAT_RESTORE)
 			TribeMemory.remember(member_name, "self_fed", "You",
 				"I helped myself to the stockpile -- you trust me enough for that now.",
@@ -2311,19 +2315,24 @@ func _complete_task() -> void:
 			_task_result = "found nothing to scout"
 		_scouted_camp = null
 
-	# keep personal rations first, then drop the SURPLUS in your stockpile
+	# keep personal rations first, then drop the SURPLUS in your stockpile --
+	# PER-SETTLEMENT ECONOMIES (2026-08-04): a resident deposits into their
+	# OWN settlement's local stockpile instead of the shared camp one (see
+	# Tribemanager.add_food_at() and friends -- a non-resident falls straight
+	# through to the original add_food()/add_materials()/add_wood(), so
+	# nothing changes for the main camp).
 	if _task_food > 0:
 		var room := maxi(0, RATION_RESERVE - inv_food)
 		var keep := mini(room, _task_food)
 		inv_food += keep
 		var surplus := _task_food - keep
-		if surplus > 0 and manager and manager.has_method("add_food"):
-			manager.add_food(surplus)
+		if surplus > 0 and manager and manager.has_method("add_food_at"):
+			manager.add_food_at(home_pos, surplus)
 		contrib_food += _task_food
-	if _task_mats > 0 and manager and manager.has_method("add_materials"):
-		manager.add_materials(_task_mats)
-	if _task_wood > 0 and manager and manager.has_method("add_wood"):
-		manager.add_wood(_task_wood)
+	if _task_mats > 0 and manager and manager.has_method("add_materials_at"):
+		manager.add_materials_at(home_pos, _task_mats)
+	if _task_wood > 0 and manager and manager.has_method("add_wood_at"):
+		manager.add_wood_at(home_pos, _task_wood)
 		contrib_wood += _task_wood
 	_task_wood = 0
 	# loyalty only grows from work done WILLINGLY — paid mercenaries earn nothing

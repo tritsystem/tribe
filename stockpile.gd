@@ -19,6 +19,16 @@ var settlement_name: String = ""
 # the real structures/mechanical effects tied to each. Blank on the home
 # stockpile, same as settlement_name.
 var district: String = ""
+# PER-SETTLEMENT ECONOMIES (2026-08-04): previously an explicit, honest gap
+# -- "there is one tribe economy in this codebase, not a per-camp inventory
+# system". An outpost now carries its own REAL local stockpile: residents
+# (see Tribemanager.add_food_at()/spend_food_at() and friends) deposit into
+# and draw from these instead of the shared camp economy. Always 0 on the
+# home stockpile, which still uses the manager's own totals as it always
+# has -- this only applies to settlements founded away from camp.
+var local_food: int = 0
+var local_wood: int = 0
+var local_materials: int = 0
 
 func _ready() -> void:
 	add_to_group("stockpile")
@@ -89,10 +99,13 @@ func _process(_delta: float) -> void:
 		manager = get_tree().get_first_node_in_group("tribe_manager")
 	if manager == null:
 		return
-	var food: int = manager.food
-	var skins: int = manager.materials
+	# an OUTPOST shows its own real local economy; the home stockpile keeps
+	# showing the manager's shared totals exactly as it always has.
+	var is_outpost: bool = settlement_name != ""
+	var food: int = local_food if is_outpost else manager.food
+	var skins: int = local_materials if is_outpost else manager.materials
 	var clbs: int = manager.clubs
-	var wd: int = manager.wood
+	var wd: int = local_wood if is_outpost else manager.wood
 	if _pile:
 		var s := clampf(float(food + skins * 2) / 30.0, 0.12, 3.2)
 		_pile.scale = Vector3(1.0, s, 1.0)
