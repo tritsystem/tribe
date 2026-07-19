@@ -29,9 +29,12 @@ func _ready() -> void:
 	_check("the outpost stockpile actually carries a real, non-empty settlement name",
 		str(sp.get("settlement_name")) != "")
 
+	# teepee count is 2, or 3 if this settlement happened to roll the
+	# "Gathering" district (see Tribemanager._build_district_structures(),
+	# added after this test was first written) -- either way, real homes.
 	var after_teepees: Array = get_tree().get_nodes_in_group("teepee")
-	_check("founding the outpost raises two real teepees near it",
-		after_teepees.size() == 2)
+	_check("founding the outpost raises real teepees near it",
+		after_teepees.size() == 2 or after_teepees.size() == 3)
 	for t in after_teepees:
 		_check("each teepee is actually placed near the outpost, not at the origin",
 			(t as Node3D).global_position.distance_to(Vector3(200, 0, 0)) < 10.0)

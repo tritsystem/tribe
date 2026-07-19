@@ -164,6 +164,24 @@ func _brain_text() -> String:
 
 var current_rank: String = "Stranger"
 
+# ── SOCIETAL HIERARCHY (2026-08-03) ─────────────────────────────────────────
+# A real social structure on top of the trust-rank ladder above: current_rank
+# is "how much do I trust the Leader"; social_role is "what am I actually IN
+# this tribe" -- a title that reflects what a member genuinely DOES
+# (_job_counts, incremented once per real completed task in _complete_task())
+# rather than something assigned once and forgotten. Grows WITH the tribe:
+# Official is a small, genuinely elite slot (Tribemanager.official_quota()
+# scales with roster size, never more than a real minority), and Outpostman
+# is earned by literally having founded or migrated to a settlement (see
+# home_pos -- the same real anchor tribemember.gd already re-plants on
+# founding/migrating), not just a job tally.
+const ROLE_HIERARCHY := [
+	"Official", "Outpostman", "Trader", "Forager", "Hunter",
+	"Builder", "Elite Builder", "Warrior", "Spy",
+]
+var social_role: String = "Forager"
+var _job_counts: Dictionary = {}   # job kind -> completions
+
 # ── thought system ──
 var current_thought: String = "..."
 var _thought_timer: float = 0.0
@@ -436,7 +454,12 @@ func craft_weapon(tier: int) -> bool:
 	if manager == null or not manager.has_method("spend_materials"):
 		return false
 	tier = clampi(tier, 0, WEAPON_TIERS.size() - 1)
-	if not manager.spend_materials(_GEAR_MAT_COST):
+	# DISTRICT BONUS (2026-08-03): a Crafting settlement's workshop genuinely
+	# cuts material cost for its own residents.
+	var cost: int = _GEAR_MAT_COST
+	if manager.has_method("crafting_discount_at"):
+		cost = maxi(1, int(round(float(_GEAR_MAT_COST) * manager.crafting_discount_at(home_pos))))
+	if not manager.spend_materials(cost):
 		_think("Not enough materials to craft that yet.", 2.0)
 		return false
 	weapon = tier
@@ -1632,6 +1655,37 @@ func _update_rank() -> void:
 		TribeMemory.remember(member_name, "bond", "You",
 			"My feeling toward you %s to %s." % ["deepened" if rose else "cooled", current_rank],
 			"warm" if rose else "wary", 0.25 if rose else -0.25)
+		_update_social_role()   # a rank change can immediately make/unmake an Official
+
+# a real job kind maps to the role that best reflects it -- "raid"/"guard"
+# both read as martial work, "wood"/"carve" as basic labor, "build" (raising
+# the actual fortress ring) as the more skilled trade.
+const JOB_TO_ROLE := {
+	"gather": "Forager", "hunt": "Hunter", "wood": "Builder",
+	"carve": "Builder", "build": "Elite Builder", "scout": "Spy",
+	"guard": "Warrior", "raid": "Warrior", "recruit": "Trader",
+}
+
+## Recomputes social_role from what this member actually does. Official and
+## Outpostman are checked FIRST and override the job-tally result entirely --
+## both are earned through something bigger than any single task (sustained
+## top-tier loyalty within a real, tribe-size-scaled quota; or literally
+## having founded/migrated to a settlement), not just "did this job most".
+func _update_social_role() -> void:
+	if current_rank == "Devoted" and manager and manager.has_method("is_official") and manager.is_official(self):
+		social_role = "Official"
+		return
+	if manager and manager.has_method("is_outpostman") and manager.is_outpostman(home_pos):
+		social_role = "Outpostman"
+		return
+	var best_job := ""
+	var best_count := 0
+	for k in _job_counts:
+		var c: int = int(_job_counts[k])
+		if c > best_count:
+			best_count = c
+			best_job = k
+	social_role = str(JOB_TO_ROLE.get(best_job, "Forager"))
 
 # UI hint: how much more relationship trust is needed to reach the next rank.
 func relationship_to_next_rank() -> float:
@@ -1958,6 +2012,11 @@ func _begin_return() -> void:
 func _do_gather() -> void:
 	if _target_node and _target_node.has_method("harvest"):
 		var got: int = _target_node.harvest(4.0)
+		# DISTRICT BONUS (2026-08-03): a Gathering settlement's own foragers
+		# genuinely bring back more -- the real payoff Watch already got,
+		# closed for the other two districts too.
+		if manager and manager.has_method("gathering_bonus_at"):
+			got = int(round(float(got) * manager.gathering_bonus_at(home_pos)))
 		_task_food += got
 		_task_result = "berries x%d" % got
 
@@ -2196,6 +2255,12 @@ func _complete_task() -> void:
 	if _has_club and manager and manager.has_method("release_club"):
 		manager.release_club()   # return the club to the rack
 		_has_club = false
+	# SOCIETAL HIERARCHY (2026-08-03): track how many times each job kind has
+	# actually been completed, so a member's real role in the tribe (see
+	# _update_social_role()) reflects what they actually DO, not just a
+	# fixed title -- a real hierarchy that grows out of behavior.
+	_job_counts[k] = int(_job_counts.get(k, 0)) + 1
+	_update_social_role()
 	# count progress toward a standing leader objective
 	if _standing_job == k:
 		match k:

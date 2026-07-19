@@ -642,6 +642,71 @@ func sight_bonus_at(pos: Vector3) -> float:
 			return WATCH_SIGHT_BONUS
 	return 1.0
 
+# DISTRICT BONUSES (2026-08-03): Watch got a real payoff (sight_bonus_at,
+# above) when districts first shipped; Gathering and Crafting only got
+# distinct STRUCTURES, no actual mechanical effect -- a real, flagged gap.
+# Closed the same way: read by tribemember.gd wherever the matching action
+# already happens (_do_gather(), gear crafting), gated on RESIDENCE_RADIUS
+# the same way sight_bonus_at() already is.
+const GATHERING_YIELD_BONUS := 1.25   # a Gathering settlement's foragers bring back more
+const CRAFTING_COST_DISCOUNT := 0.75  # a Crafting settlement's workshop cuts material cost
+
+func gathering_bonus_at(pos: Vector3) -> float:
+	for o in outposts:
+		if is_instance_valid(o) and str(o.get("district")) == "Gathering" \
+				and (o as Node3D).global_position.distance_to(pos) <= RESIDENCE_RADIUS:
+			return GATHERING_YIELD_BONUS
+	return 1.0
+
+func crafting_discount_at(pos: Vector3) -> float:
+	for o in outposts:
+		if is_instance_valid(o) and str(o.get("district")) == "Crafting" \
+				and (o as Node3D).global_position.distance_to(pos) <= RESIDENCE_RADIUS:
+			return CRAFTING_COST_DISCOUNT
+	return 1.0
+
+# ── SOCIETAL HIERARCHY (2026-08-03) ─────────────────────────────────────────
+# The "small select group of officials" side of tribemember.gd's social_role
+# system lives HERE rather than per-member, because "who's an Official" is a
+# genuinely TRIBE-WIDE comparison (the most loyal, relative to everyone
+# else), not something one member can answer about themselves in isolation.
+# The quota itself GROWS with the tribe (roughly one Official per 10
+# members, always at least one, never more than a real minority) -- a
+# bigger tribe has room for a bigger (but still small) governing circle.
+func official_quota() -> int:
+	return maxi(1, int(ceil(float(members.size()) / 10.0)))
+
+## Is `member` one of the tribe's Officials right now? Only ever true for a
+## Devoted member (checked by the caller too, but re-checked here so this
+## stays correct even if called directly) who ranks in the top
+## official_quota() by relationship among every OTHER Devoted member --
+## reaching Devoted rank alone is not enough on its own; officialdom is a
+## real, scarce, comparative honor.
+func is_official(member) -> bool:
+	if not is_instance_valid(member) or str(member.get("current_rank")) != "Devoted":
+		return false
+	var devoted: Array = []
+	for m in members:
+		if is_instance_valid(m) and str(m.get("current_rank")) == "Devoted":
+			devoted.append(m)
+	devoted.sort_custom(func(a, b): return float(a.get("relationship")) > float(b.get("relationship")))
+	var quota: int = official_quota()
+	for i in range(mini(quota, devoted.size())):
+		if devoted[i] == member:
+			return true
+	return false
+
+## Is `pos` (a member's own home_pos) at one of the tribe's founded
+## settlements? Backs the "Outpostman" role -- earned by literally having
+## founded or migrated to a settlement (see tribemember.gd's
+## _begin_fallback()/_start_migrate(), which are the only two places
+## home_pos ever moves off the original camp), not just a job tally.
+func is_outpostman(pos: Vector3) -> bool:
+	for o in outposts:
+		if is_instance_valid(o) and (o as Node3D).global_position.distance_to(pos) <= RESIDENCE_RADIUS:
+			return true
+	return false
+
 # MIGRATION (2026-07-31): so a member can find and join an EXISTING
 # settlement instead of only the founder ever living there. Residency is
 # read straight off each member's own home_pos (the same field

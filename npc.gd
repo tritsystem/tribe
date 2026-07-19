@@ -171,6 +171,36 @@ const RIVAL_NAMES := [
 	"Alba", "Dresk", "Ottavia", "Quinlen", "Fenrik", "Bryn", "Hesper", "Yara",
 ]
 
+# SOCIETAL HIERARCHY (2026-08-03) -- every tribe has real social structure,
+# not just the player's own. Rival NPCs are ephemeral under this game's own
+# LOD design (spawned/despawned as the player moves near/away, see
+# world_tribe.gd's _ensure_spawned()/_tick_lod()), so a persistent, growing
+# hierarchy per individual the way tribemember.gd tracks one isn't viable
+# here -- instead each rival gets a REAL role at spawn, weighted toward
+# their own tribe's archetype (a Raiders clan skews Warrior/Spy, a Traders
+# clan skews Trader, etc.), with a small, genuinely rare chance of being one
+# of that tribe's Officials.
+const ROLE_HIERARCHY := [
+	"Official", "Outpostman", "Trader", "Forager", "Hunter",
+	"Builder", "Elite Builder", "Warrior", "Spy",
+]
+const ARCHETYPE_ROLE_BIAS := {
+	"Foragers": ["Forager", "Forager", "Outpostman"],
+	"Hunters": ["Hunter", "Hunter", "Warrior"],
+	"Raiders": ["Warrior", "Warrior", "Spy"],
+	"Traders": ["Trader", "Trader", "Outpostman"],
+	"Nomads": ["Outpostman", "Forager", "Spy"],
+	"Warriors": ["Warrior", "Warrior", "Elite Builder"],
+	"Fishers": ["Forager", "Hunter", "Trader"],
+	"Herders": ["Forager", "Outpostman", "Trader"],
+	"Mystics": ["Spy", "Trader", "Official"],
+	"Builders": ["Builder", "Elite Builder", "Elite Builder"],
+	"Wanderers": ["Outpostman", "Forager", "Spy"],
+	"Slavers": ["Warrior", "Spy", "Trader"],
+}
+const OFFICIAL_CHANCE := 0.05   # genuinely rare -- a real minority, same spirit as the player tribe's quota
+var social_role: String = "Forager"
+
 func setup(t, h: Vector3, terr: float, col: Color) -> void:
 	tribe = t
 	home = h
@@ -181,6 +211,11 @@ func setup(t, h: Vector3, terr: float, col: Color) -> void:
 	if t:
 		member_name = RIVAL_NAMES[randi() % RIVAL_NAMES.size()]
 		personality = t.archetype
+		if randf() < OFFICIAL_CHANCE:
+			social_role = "Official"
+		else:
+			var bias: Array = ARCHETYPE_ROLE_BIAS.get(str(t.archetype), ["Forager"])
+			social_role = str(bias[randi() % bias.size()])
 		# HIVE MIND: point at the tribe's one shared brain instead of running
 		# an individual copy — matches spikeling.gd's own design intent
 		# ("Run ONE of these per horde, not one per zombie").
