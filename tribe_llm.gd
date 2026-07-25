@@ -43,14 +43,20 @@ extends Node
 # Cheap: static text in a prompt already being sent. A verification pass would
 # double the measured 2.5-4.2s latency on every single line.
 const WORLD := """
-This world contains ONLY: berry bushes, trees and wood, animals to hunt, carved
-clubs, a stockpile of food, camp fires, dogs, rival tribes who raid, hunger, and
-the Leader (the player).
-It has NO weather, NO rain or sun or storms, NO seasons, NO night or day, NO
-calendar. Never mention rain, weather, "today", "yesterday", "tomorrow", "the
-other day", or any event that is not in your memories below. If you have no
-memory of something, do not invent one -- say you don't know, or speak about
-what you DO remember.
+This world contains ONLY: berry bushes/herbs/roots/mushrooms/nuts/grain,
+trees to chop, ore/stone/gems/coal/clay/sand to mine, animals to hunt, carved
+clubs and crafted weapons/armor, teepees, a stockpile of food, a trading
+post (if one has been built), a blacksmith's forge (in a Crafting
+settlement), a real campfire at camp, dogs, rival tribes who raid and
+trade, hunger, and the Leader (the player).
+There IS a day/night cycle now. At night the tribe gathers at the real
+campfire to gossip, laugh, and dance -- you may mention this if it fits.
+It has NO weather beyond rain/storm/fog/clear (no seasons, no calendar).
+Never mention "today", "yesterday", "tomorrow", "the other day", or any
+event that is not in your memories below. If you have no memory of
+something, do not invent one -- say you don't know, or speak about what
+you DO remember. Only mention a building or landmark if it is listed here
+as existing, or you have a real memory of it below -- never invent one.
 """
 
 const OLLAMA_URL := "http://127.0.0.1:11434/api/generate"
@@ -76,12 +82,32 @@ var available := true              # flipped false if Ollama errors out
 var warm := false                  # model loaded? until then, NPCs use fallbacks
 var _warming := false
 
+# HYSTERESIS QUEUE GATE (2026-07-19): the queue-backlog check below used to
+# be a single flat threshold (_queue.size() >= MAX_QUEUE). The queue fills
+# and drains constantly as NPCs talk -- sitting right at that boundary, an
+# ongoing conversation could flip between real LLM lines and canned
+# fallbacks mid-exchange for no real reason (one line queued vs one line
+# just popped). Real dual-threshold hysteresis fixes this the same way it
+# stabilizes Project Thought's brain sandbox: once the queue is genuinely
+# backed up (>=85% full), stay in fallback mode until it's genuinely
+# drained (<=25% full), not just one line under the cap.
+const HysteresisGateScript = preload("res://hysteresis_gate.gd")
+var _queue_gate: HysteresisGate
+
 func _ready() -> void:
 	_http = HTTPRequest.new()
 	add_child(_http)
 	_http.request_completed.connect(_on_done)
+	_queue_gate = HysteresisGateScript.new(0.25, 0.85)
 	_warmup()
 	set_process(true)
+
+## True if the queue is genuinely backed up right now -- hysteresis-gated so
+## draining by one line right at the cap doesn't immediately let a new call
+## back in, only to hit the cap again a moment later.
+func _queue_backed_up() -> bool:
+	var load: float = float(_queue.size()) / float(MAX_QUEUE)
+	return _queue_gate.update(load)
 
 ## Load the model NOW with a long leash, so no NPC ever eats the cold-start cost.
 ## Until this lands, say_as() returns canned lines -- the camp murmurs from the
@@ -118,7 +144,7 @@ func say_as(speaker: String, listener: String, persona: String, memories: String
 	# not warm yet (model still loading) or backed up -> speak a canned line NOW
 	# rather than queue latency. An NPC saying something plain beats an NPC
 	# standing mute for a minute waiting on a cold model.
-	if not available or not warm or _queue.size() >= MAX_QUEUE:
+	if not available or not warm or _queue_backed_up():
 		line_ready.emit(speaker, listener, fallback, tag)
 		return
 	# ROSTER: the measured hallucinations were name-SHAPED -- "Leader Kanaq",
@@ -151,7 +177,7 @@ const POEM_MAX_TOKENS := 120   # a short verse needs more room than a single spo
 ## write a poem or a song so the shape of what comes back actually varies.
 func compose_as(speaker: String, persona: String, memories: String, situation: String,
 		form: String, fallback: String, tag: String = "compose") -> void:
-	if not available or not warm or _queue.size() >= MAX_QUEUE:
+	if not available or not warm or _queue_backed_up():
 		line_ready.emit(speaker, speaker, fallback, tag)
 		return
 	var prompt := """You are %s, a member of a stone-age tribe. %s

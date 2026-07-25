@@ -10,9 +10,19 @@ extends CharacterBody3D
 # In groups "animal" (huntable) and "has_brain" (B brain-viewer shows it).
 # ─────────────────────────────────────────────────────────────────────────────
 
+const SpatialGrid = preload("res://spatial_grid.gd")
+
 var brain: Spikeling
 var anim: BodyAnim
-var _head: MeshInstance3D
+## BUG FIXED (2026-07-19): was typed MeshInstance3D -- fine while _head was
+## always a real mesh sphere, but the real modeled animals' HeadMarker is a
+## plain Node3D empty (no mesh of its own, just an eye-attachment point).
+## Assigning a Node3D into a var strictly typed MeshInstance3D silently
+## nulled it out instead of erroring, which broke both eye placement AND
+## anim.setup()'s head-driven animation for every real model.
+var _head: Node3D
+var _legs: Array = []      # Leg0..Leg3, each pivoting at its own hip -- see _animate_legs()
+var _leg_phase: float = 0.0
 @export var species: String = "Deer"
 @export var member_name: String = "Deer"     # lets the brain-viewer label it
 @export var personality: String = "Wild"     # ditto (duck-typed with members)
@@ -23,11 +33,20 @@ var flee_speed: float = 2.4
 var food_yield: int = 2
 var skins_yield: int = 1
 
-# species table: stats + how readily the brain panics (threat_w on SeeThreat->Flee)
+# DIVERSITY PASS (2026-07-19): "10x the diversity of animals" -- was 3
+# species. Same stat shape (color/scale/wander/flee/sense/food/skins/
+# threat_w), just more of them, spanning a real range from jumpy/low-yield
+# to dangerous/high-yield so hunting still has texture across a whole map.
 const SPECIES := {
-	"Rabbit": {"color": Color(0.80, 0.78, 0.72), "scale": 0.55, "wander": 2.1, "flee": 3.3, "sense": 9.5, "food": 1, "skins": 0, "threat_w": 160},
-	"Deer":   {"color": Color(0.55, 0.40, 0.28), "scale": 1.0,  "wander": 1.7, "flee": 2.5, "sense": 7.0, "food": 2, "skins": 1, "threat_w": 130},
-	"Boar":   {"color": Color(0.34, 0.30, 0.28), "scale": 1.15, "wander": 1.3, "flee": 1.9, "sense": 5.0, "food": 3, "skins": 2, "threat_w": 95},
+	"Rabbit":  {"color": Color(0.80, 0.78, 0.72), "scale": 0.55, "wander": 2.1, "flee": 3.3, "sense": 9.5, "food": 1, "skins": 0, "threat_w": 160},
+	"Hare":    {"color": Color(0.72, 0.68, 0.60), "scale": 0.50, "wander": 2.3, "flee": 3.6, "sense": 10.0, "food": 1, "skins": 0, "threat_w": 170},
+	"Fox":     {"color": Color(0.75, 0.35, 0.18), "scale": 0.70, "wander": 1.9, "flee": 3.0, "sense": 8.5, "food": 1, "skins": 1, "threat_w": 150},
+	"Deer":    {"color": Color(0.55, 0.40, 0.28), "scale": 1.0,  "wander": 1.7, "flee": 2.5, "sense": 7.0, "food": 2, "skins": 1, "threat_w": 130},
+	"Goat":    {"color": Color(0.68, 0.66, 0.60), "scale": 0.85, "wander": 1.6, "flee": 2.3, "sense": 6.5, "food": 2, "skins": 1, "threat_w": 120},
+	"Elk":     {"color": Color(0.42, 0.32, 0.20), "scale": 1.3,  "wander": 1.5, "flee": 2.2, "sense": 6.0, "food": 3, "skins": 2, "threat_w": 110},
+	"Boar":    {"color": Color(0.34, 0.30, 0.28), "scale": 1.15, "wander": 1.3, "flee": 1.9, "sense": 5.0, "food": 3, "skins": 2, "threat_w": 95},
+	"Wolf":    {"color": Color(0.50, 0.50, 0.52), "scale": 1.05, "wander": 1.8, "flee": 1.6, "sense": 8.0, "food": 2, "skins": 2, "threat_w": 70},
+	"Bear":    {"color": Color(0.30, 0.22, 0.16), "scale": 1.6,  "wander": 1.1, "flee": 1.3, "sense": 5.5, "food": 4, "skins": 2, "threat_w": 50},
 }
 
 var gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity", 9.8)
@@ -47,6 +66,10 @@ var _last_pos: Vector3 = Vector3.ZERO
 func _ready() -> void:
 	add_to_group("animal")
 	add_to_group("has_brain")
+	# stick to sloping ground instead of bouncing off it (see tribemember)
+	floor_snap_length = 0.8
+	floor_max_angle = deg_to_rad(54.0)
+	floor_constant_speed = true
 	var sp: Dictionary = SPECIES.get(species, SPECIES["Deer"])
 	wander_speed = sp["wander"]
 	flee_speed = sp["flee"]
@@ -74,10 +97,74 @@ func _brain_text(sp: Dictionary) -> String:
 	t += "refractory=2\n"
 	return t
 
+## REAL MODELED ASSETS (2026-07-19): a proper low-poly quadruped body
+## (torso/head/snout/ears/legs/tail, generated in Blender -- see
+## tools/gen_animals.py) instead of a bare capsule+sphere. Each species'
+## .glb carries its own proportions and baked material color, matching the
+## SPECIES stats they're built from. The googly eyes are deliberately NOT
+## baked into the mesh -- they stay a runtime GDScript behavior (the
+## existing wobble/pupil-offset look every creature in this game shares),
+## just attached to a real "HeadMarker" empty the model leaves at the
+## snout instead of to a bare sphere. Falls back to the old primitive body
+## if the asset is somehow missing, so a missing file never breaks the game.
 func _build(sp: Dictionary) -> void:
 	var s := float(sp["scale"])
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = sp["color"]
+	var glb_path := "res://assets/animals/%s.glb" % species.to_lower()
+	var packed: PackedScene = load(glb_path) if ResourceLoader.exists(glb_path) else null
+	if packed == null:
+		_build_fallback(sp)
+		return
+
+	var model := packed.instantiate()
+	model.name = "Mesh"
+	model.scale = Vector3(s, s, s)
+	add_child(model)
+
+	var marker := _find_node_named(model, "HeadMarker")
+	_head = (marker as Node3D) if marker != null else model
+	_build_googly_eyes(_head, 0.22 * s)
+
+	# REAL LEG ANIMATION (2026-07-19): "can we give animations" -- the model
+	# carries 4 separate leg objects (Leg0..Leg3, each pivoting at its own
+	# hip -- see tools/gen_animals.py's build_leg()) specifically so they
+	# can be rotated individually here instead of only ever being part of a
+	# single fused, unanimatable body mesh.
+	_legs.clear()
+	for i in range(4):
+		var leg := _find_node_named(model, "Leg%d" % i)
+		if leg != null and leg is Node3D:
+			_legs.append(leg)
+
+	var label := Label3D.new()
+	label.text = species
+	label.position = Vector3(0, 1.8 * s, 0)
+	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	label.modulate = Color(0.9, 0.85, 0.7)
+	add_child(label)
+
+	var col := CollisionShape3D.new()
+	var shape := CapsuleShape3D.new()
+	shape.radius = 0.4 * s
+	shape.height = 1.4 * s
+	col.shape = shape
+	col.position = Vector3(0, 0.7 * s, 0)
+	add_child(col)
+
+func _find_node_named(root: Node, name: String) -> Node:
+	if root.name == name:
+		return root
+	for c in root.get_children():
+		var found := _find_node_named(c, name)
+		if found != null:
+			return found
+	return null
+
+## Original primitive body -- kept as a real fallback (not dead code) for
+## if a species' .glb is ever missing/fails to load, so a bad asset path
+## degrades gracefully instead of leaving the animal invisible/broken.
+func _build_fallback(sp: Dictionary) -> void:
+	var s := float(sp["scale"])
+	var mat := MatCache.flat(sp["color"])
 
 	var body := MeshInstance3D.new()
 	body.name = "Mesh"
@@ -125,9 +212,8 @@ func _build_googly_eyes(parent: Node3D, head_radius: float) -> void:
 		es.height = head_radius * 0.64
 		eye.mesh = es
 		eye.position = Vector3(side * head_radius * 0.55, head_radius * 0.25, head_radius * 0.85)
-		var emat := StandardMaterial3D.new()
-		emat.albedo_color = Color(1, 1, 1)
-		eye.material_override = emat
+		eye.material_override = MatCache.flat(Color(1, 1, 1))
+		eye.add_to_group("googly_eye")   # decorative → far-culled centrally
 		parent.add_child(eye)
 
 		var pupil := MeshInstance3D.new()
@@ -137,10 +223,40 @@ func _build_googly_eyes(parent: Node3D, head_radius: float) -> void:
 		pupil.mesh = ps
 		# pupils sit slightly off-center for the classic googly-eye wobble look
 		pupil.position = Vector3(randf_range(-0.04, 0.04), randf_range(-0.04, 0.04), head_radius * 0.3)
-		var pmat := StandardMaterial3D.new()
-		pmat.albedo_color = Color(0.05, 0.05, 0.05)
-		pupil.material_override = pmat
+		pupil.material_override = MatCache.flat(Color(0.05, 0.05, 0.05))
 		eye.add_child(pupil)
+
+# ── SIMULATION LOD — animals aren't owned by a tribe (no world_tribe._tick_lod
+# to switch them off), so each one self-manages a cheap distance gate. Beyond
+# LOD_FAR_DIST from the player, physics_process is turned OFF entirely (zero
+# per-frame AI + move_and_slide + heightmap-collision cost — the single biggest
+# saving at scale, since most of the herd is nowhere near you). The gate itself
+# runs in _process (which keeps ticking while physics_process is off) on a slow
+# ~0.5s poll, so a far animal costs one distance check twice a second and
+# nothing else. It re-wakes the moment you get close, resuming exactly where it
+# left off. Distance changes slowly relative to the poll, so nothing pops.
+const LOD_FAR_DIST := 65.0
+var _lod_accum: float = 0.0
+
+func _process(delta: float) -> void:
+	_lod_accum -= delta
+	if _lod_accum > 0.0:
+		return
+	_lod_accum = randf_range(0.4, 0.6)
+	# PERF/SEARCH FIX (2026-07-19): _nearest_animal() (tribemember.gd) used to
+	# scan get_tree().get_nodes_in_group("animal") in full every call. This
+	# tick already fires a few times a second regardless of LOD tier, so it's
+	# a free place to keep this animal's SpatialGrid cell current as it roams.
+	SpatialGrid.update(self)
+	var p := get_tree().get_first_node_in_group("player") as Node3D
+	if p == null or not is_instance_valid(p):
+		return
+	var far: bool = global_position.distance_to(p.global_position) > LOD_FAR_DIST
+	if far == is_physics_processing():
+		# entering FAR while currently processing, or leaving FAR while stopped
+		set_physics_process(not far)
+		if far:
+			_tick_accum = 0.0   # no burst of catch-up brain ticks on re-entry
 
 func _physics_process(delta: float) -> void:
 	_tick_accum += delta
@@ -199,10 +315,46 @@ func _animate_body(delta: float) -> void:
 	var spd := Vector2(velocity.x, velocity.z).length()
 	anim.tension = clampf(brain.get_potential("SeeThreat") / 50.0, 0.0, 1.0)
 	anim.tick(delta, spd, is_on_floor())
+	_animate_legs(delta, spd)
+
+## Real per-leg walk cycle -- a diagonal/trot gait (front-left + back-right
+## swing together, front-right + back-left opposite), the natural gait for
+## a walking quadruped. Rotates each leg from its own hip pivot (each Leg
+## object's local origin IS its hip -- see build_leg() in gen_animals.py),
+## so this needs no inverse kinematics, just a rotation offset.
+const LEG_SWING_MAX := 0.55         # radians at a full stride
+const LEG_SWING_REF_SPEED := 2.6    # speed that reads as a full walk
+
+func _animate_legs(delta: float, speed: float) -> void:
+	if _legs.size() < 4:
+		return
+	var move := clampf(speed / LEG_SWING_REF_SPEED, 0.0, 1.0)
+	if move < 0.03:
+		for l in _legs:
+			(l as Node3D).rotation.x = move_toward((l as Node3D).rotation.x, 0.0, delta * 6.0)
+		return
+	_leg_phase += delta * (5.0 + speed * 2.5)
+	var swing := LEG_SWING_MAX * move
+	(_legs[0] as Node3D).rotation.x = sin(_leg_phase) * swing          # front-left
+	(_legs[3] as Node3D).rotation.x = sin(_leg_phase) * swing          # back-right
+	(_legs[1] as Node3D).rotation.x = sin(_leg_phase + PI) * swing     # front-right
+	(_legs[2] as Node3D).rotation.x = sin(_leg_phase + PI) * swing     # back-left
 
 # ── one spiking tick: feed senses in, read drives out ──
+var _threat_scan_cd: float = 0.0
+
 func _brain_tick() -> void:
-	var threat := _nearest_threat()
+	# _nearest_threat() scans every player/tribe/npc/club node in the scene —
+	# O(active_animals x total_npcs) if run every brain tick (8Hz). At Epic that
+	# scan, multiplied across the whole nearby herd, was the animals' dominant
+	# per-frame cost. Prey doesn't need 8Hz predator sampling: rescan a few times
+	# a second and reuse the cached threat in between. Startle latency stays well
+	# under the flee reaction anyone would notice.
+	_threat_scan_cd -= 1.0 / TICK_HZ
+	if _threat_scan_cd <= 0.0:
+		_threat_scan_cd = randf_range(0.3, 0.45)
+		_threat = _nearest_threat()
+	var threat: Node3D = _threat if is_instance_valid(_threat) else null
 	if threat:
 		_threat = threat
 		var dist := global_position.distance_to(threat.global_position)
@@ -278,6 +430,13 @@ func _wander(delta: float) -> void:
 		var r := randf() * 8.0
 		_wander_target = home_pos + Vector3(cos(ang), 0, sin(ang)) * r
 		_wander_target.y = home_pos.y
+		# KEEP ANIMALS OUT OF THE SEA. home_pos is on land (land-gated at spawn),
+		# but a wander step could wade into the ocean where they'd walk the
+		# seafloor. On island maps, reject a watery target and just stay put by
+		# home this cycle -- animals graze the land, they don't swim.
+		var mgr = get_tree().get_first_node_in_group("tribe_manager")
+		if mgr != null and mgr.has_method("terrain_is_water") and mgr.terrain_is_water(_wander_target.x, _wander_target.z):
+			_wander_target = home_pos
 		_wander_pause = randf_range(0.8, 2.5)
 		_halt()
 		return
@@ -340,5 +499,6 @@ func killed() -> Dictionary:
 		"food": food_yield + (randi() % 2),
 		"skins": skins_yield + (1 if skins_yield > 0 and randf() < 0.4 else 0),
 	}
+	SpatialGrid.remove(self)
 	queue_free()
 	return loot

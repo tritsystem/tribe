@@ -11,11 +11,13 @@ var _rail: MeshInstance3D = null
 
 func _ready() -> void:
 	add_to_group("fence")
+	# layer 4 = structures: player collides (masks it), AI phases through so it
+	# can't jam on a fence. See block.gd for the full rationale.
+	collision_layer = 8
 	_build()
 
 func _build() -> void:
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = tint
+	var mat := MatCache.flat(tint)
 	for x in [-0.7, 0.7]:
 		var post := MeshInstance3D.new()
 		var pm := BoxMesh.new()

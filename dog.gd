@@ -1,3 +1,12 @@
+
+
+
+
+
+
+
+
+
 extends CharacterBody3D
 # ─────────────────────────────────────────────────────────────────────────────
 # Dog — a wild hound you can FEED to win its loyalty. The same trust idea as the
@@ -84,8 +93,7 @@ func is_loyal() -> bool:
 
 # ── build a low four-ish-legged silhouette (body + head + collision) ──
 func _build() -> void:
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = _color
+	var mat := MatCache.flat(_color)
 
 	var body := MeshInstance3D.new()
 	body.name = "Mesh"
@@ -146,9 +154,7 @@ func _recolor() -> void:
 	_color = Color(0.72, 0.56, 0.30) if is_loyal() else Color(0.5, 0.5, 0.52)
 	for n in [get_node_or_null("Mesh"), _head]:
 		if n:
-			var m := StandardMaterial3D.new()
-			m.albedo_color = _color
-			(n as MeshInstance3D).material_override = m
+			(n as MeshInstance3D).material_override = MatCache.flat(_color)
 
 func _update_label() -> void:
 	if _label == null:

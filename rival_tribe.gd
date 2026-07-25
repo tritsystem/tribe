@@ -23,9 +23,7 @@ func _build() -> void:
 		fig.mesh = CapsuleMesh.new()
 		var ang := TAU * float(i) / float(count)
 		fig.position = Vector3(cos(ang) * 2.0, 1.0, sin(ang) * 2.0)
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = Color(0.72, 0.25, 0.22)
-		fig.material_override = mat
+		fig.material_override = MatCache.flat(Color(0.72, 0.25, 0.22))
 		add_child(fig)
 
 	var banner := Label3D.new()

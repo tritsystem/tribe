@@ -24,9 +24,7 @@ func _build() -> void:
 	cm.height = 2.6
 	cone.mesh = cm
 	cone.position = Vector3(0, 1.3, 0)
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = tint
-	cone.material_override = mat
+	cone.material_override = MatCache.flat(tint)
 	add_child(cone)
 
 	# a dark smoke-hole gap at the top
@@ -37,9 +35,7 @@ func _build() -> void:
 	cs.height = 0.3
 	cap.mesh = cs
 	cap.position = Vector3(0, 2.55, 0)
-	var capmat := StandardMaterial3D.new()
-	capmat.albedo_color = Color(0.08, 0.07, 0.06)
-	cap.material_override = capmat
+	cap.material_override = MatCache.flat(Color(0.08, 0.07, 0.06))
 	add_child(cap)
 
 	# NO collision: same reasoning as tree.gd. Camps cluster 2-4 of these

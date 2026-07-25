@@ -31,6 +31,34 @@ const TribeRegistry = preload("res://tribe_registry.gd")
 var material_stock: int = 0
 const MATERIAL_STOCK_CAP := 40
 
+# ── WEAPONS & ARMOR TECH ─────────────────────────────────────────────────────
+# A tribe forges gear for its whole roster from the material culture it stocks.
+# weapon_level / armor_level (0..3) are the tribe's shared tech tier; every
+# member is set to it (npc.set_gear). Wealthier, older tribes that have banked
+# more material_stock climb higher, which also raises `strength` (so the
+# abstract war resolution genuinely favors well-equipped clans). Each archetype's
+# signature material biases WHICH track it favors — an Obsidian tribe sharpens
+# weapons, a Bronze tribe plates armor — see MATERIAL_GEAR. Kept as a couple of
+# ints plus a cheap periodic tick; no per-member state until a member exists.
+var weapon_level: int = 0
+var armor_level: int = 0
+const GEAR_TIER_MAX := 3
+const GEAR_UPGRADE_COST := 6      # material_stock spent per tier-up
+const GEAR_STRENGTH_BONUS := 7    # strength gained per gear tier forged
+var _gear_accum: float = 0.0
+const GEAR_TICK_INTERVAL := 6.0
+# per-material bias: {weapon, armor} in 0..1 — scales each track's effective
+# ceiling (bias*3), so a low-bias track tops out early and the tribe spends its
+# materials on what its culture is good at. Unknown materials fall back to even.
+const MATERIAL_GEAR := {
+	"Bronze":   {"weapon": 0.55, "armor": 1.0},   # metalworkers — armor and axes
+	"Obsidian": {"weapon": 1.0,  "armor": 0.45},  # knappers — sharp weapons
+	"Glass":    {"weapon": 0.85, "armor": 0.35},  # brittle but keen — weapons
+	"Bone":     {"weapon": 0.5,  "armor": 0.75},  # carvers — light armor
+	"Stone":    {"weapon": 0.6,  "armor": 0.6},   # balanced
+}
+const _DEFAULT_GEAR_BIAS := {"weapon": 0.5, "armor": 0.5}
+
 func material_name() -> String:
 	return str(TribeRegistry.get_archetype(archetype).get("material", "Stone"))
 
@@ -76,10 +104,27 @@ var wood: int = 0                # spent on blocks for the camp's wall/maze — 
 								  # setup() for the starting pool and _build()
 								  # for the grove of trees spawned beside camp
 var blocks: Array = []           # every standing block.gd this tribe placed
+var roofs: Array = []            # every roof.gd cap this tribe placed (castle phase)
 
 var built: bool = false
 var _fence_plan: Array = []
 var _fence_accum: float = 0.0
+
+# ── CASTLE UPGRADE ── once the palisade is up and the tribe has matured
+# (enough members + banked material + timber), it invests in a castle: crenel-
+# lated battlements on the curtain wall, roofed corner towers, and a central
+# roofed KEEP. Reuses the same walk-to-and-place builder-squad pattern as the
+# palisade (see _build_castle), so members physically raise it segment by
+# segment. Gated below so only established tribes ever build one.
+var castle_built: bool = false
+var forge_built: bool = false
+var _castle_plan: Array = []
+var _castle_accum: float = 0.0
+var _castle_builders: Array = []
+var _castle_claimed: Dictionary = {}
+const CASTLE_MIN_MEMBERS := 6
+const CASTLE_MATERIAL_COST := 12
+const CASTLE_MIN_WOOD := 20
 
 # ── coordinated war musters ──
 var war_party: Array = []
@@ -122,8 +167,8 @@ const BRAIN_TICK_HZ := 8.0
 # (zero cost) once we're far enough off that the player can't tell. The
 # tribe's own economy (_grow, opinions, leader election) keeps running here
 # regardless of tier, so a frozen-far tribe still grows/changes quietly.
-const LOD_NEAR_DIST := 50.0
-const LOD_MID_DIST := 150.0
+const LOD_NEAR_DIST := 40.0
+const LOD_MID_DIST := 80.0
 const LOD_CHECK_INTERVAL := 0.5
 var _lod_accum: float = 0.0
 var _lod_tier: int = 0   # cached tier from last _tick_lod; 2 = far (brain skipped)
@@ -150,6 +195,9 @@ var leader_traits: Dictionary = {
 # leader is high-honor (holds grudges longer). ──
 var opinions: Dictionary = {}    # tribe_name -> grudge float (0 = neutral, 1 = blood feud)
 var player_opinion: float = 0.0  # -1 hostile .. +1 friendly, ripples from other tribes' fates
+# kept in sync with Tribemanager's own MURDER_*_HIT consts (see on_member_died there)
+const MURDER_OPINION_HIT := 0.30
+const MURDER_RIVALRY_HIT := 0.35
 
 func setup(nm: String, col: Color, arch: String, p_size: int, mgr) -> void:
 	tribe_name = nm
@@ -186,6 +234,29 @@ func setup(nm: String, col: Color, arch: String, p_size: int, mgr) -> void:
 	# builds immediately above; only the individual walking-around members
 	# and the tree grove wait.
 	_refresh_label()
+	_level_camp_ground()
+
+## Flatten the terrain under the camp to the ground height at its centre, and drop
+## the camp onto that level. This is why the camp's structures don't float on a
+## slope: every teepee/fence/block is placed at global_position + offset, so once
+## the whole footprint is one height, the existing offset maths is correct. A
+## camp built on flat ground -- which is what a camp IS -- rather than draped over
+## a hillside. No-op with no terrain.
+func _level_camp_ground() -> void:
+	if manager == null or not manager.has_method("ground_y"):
+		return
+	var t = manager.get("terrain")
+	if t == null or not is_instance_valid(t) or not t.has_method("flatten_area"):
+		return
+	var gy: float = manager.ground_y(global_position.x, global_position.z)
+	global_position.y = gy
+	# Flatten a radius WIDER than the camp. flatten_area feathers with a smoothstep
+	# lip, so at the rim only a fraction of the level is applied -- flattening just
+	# territory_radius left the camp's OUTER structures (teepees/blocks/grove out
+	# near the edge) on partially-sloped ground, floating. Levelling ~1.8x the
+	# footprint puts the whole camp inside the fully-flat core, with the feather
+	# blending into the hillside beyond it.
+	t.flatten_area(global_position.x, global_position.z, territory_radius * 1.8 + 6.0, gy, 1.0)
 
 var _spawned: bool = false
 
@@ -202,12 +273,29 @@ func _ensure_spawned() -> void:
 # itself comes from the starting pool granted in setup() — but it's a real,
 # raidable resource sitting beside every camp, and the obvious hook for that
 # job later.
+## Seat a world position on the terrain surface at its OWN x,z. Camp grove trees
+## spawn out to 1.15*territory -- beyond the flattened footprint, on natural
+## sloping ground -- so using the camp's height floated them in the air. Every
+## camp-relative prop must sample the ground where it actually stands.
+func _seat(pos: Vector3) -> Vector3:
+	# In island mode, nudge camp-relative props (grove trees, local resource
+	# top-ups) onto dry land so they don't spawn in the sea; _land_spot returns
+	# the spot seated on the ground. When islands are off it's a pure ground-seat,
+	# identical to before.
+	if manager != null and manager.has_method("_land_spot"):
+		var land: Vector3 = manager._land_spot(pos.x, pos.z)
+		if land != Vector3.INF:
+			return land
+	if manager != null and manager.has_method("ground_y"):
+		pos.y = manager.ground_y(pos.x, pos.z)
+	return pos
+
 func _spawn_resource_grove() -> void:
 	var count := randi_range(4, 7)
 	for i in range(count):
 		var ang := randf() * TAU
 		var r := territory_radius * randf_range(0.75, 1.15)
-		var pos := global_position + Vector3(cos(ang) * r, 0.0, sin(ang) * r)
+		var pos := _seat(global_position + Vector3(cos(ang) * r, 0.0, sin(ang) * r))
 		var t = StaticBody3D.new()
 		t.set_script(load("res://tree.gd"))
 		get_parent().add_child(t)
@@ -244,7 +332,7 @@ func _tick_local_resources(delta: float) -> void:
 		var tr = StaticBody3D.new()
 		tr.set_script(load("res://tree.gd"))
 		get_parent().add_child(tr)
-		tr.global_position = _local_resource_spot(radius)
+		tr.global_position = _seat(_local_resource_spot(radius))
 
 	var near_food := 0
 	for f in get_tree().get_nodes_in_group("food_source"):
@@ -272,7 +360,49 @@ func _tick_local_resources(delta: float) -> void:
 func _local_resource_spot(radius: float) -> Vector3:
 	var ang := randf() * TAU
 	var r := radius * randf_range(0.5, 0.95)
-	return global_position + Vector3(cos(ang) * r, 0.0, sin(ang) * r)
+	# seat on the surface at the spot's own x,z, not the camp's height -- keeps
+	# camp-fed bushes/animals on the ground on sloping terrain
+	return _seat(global_position + Vector3(cos(ang) * r, 0.0, sin(ang) * r))
+
+# periodically forge a gear upgrade when we have material to spare. Picks the
+# weapon or armor track the tribe's material culture favors (the one furthest
+# below its bias-scaled ceiling), spends material_stock, bumps strength, and
+# pushes the new tier to every living member. Runs abstractly whether or not
+# members are spawned in — an unspawned far tribe still arms up over time.
+func _craft_gear_tick(delta: float) -> void:
+	if defeated:
+		return
+	_gear_accum += delta
+	if _gear_accum < GEAR_TICK_INTERVAL:
+		return
+	_gear_accum = 0.0
+	var can_w: bool = weapon_level < GEAR_TIER_MAX
+	var can_a: bool = armor_level < GEAR_TIER_MAX
+	if not can_w and not can_a:
+		return
+	if material_stock < GEAR_UPGRADE_COST:
+		return
+	var bias: Dictionary = MATERIAL_GEAR.get(material_name(), _DEFAULT_GEAR_BIAS)
+	var w_room: float = float(bias.get("weapon", 0.5)) * float(GEAR_TIER_MAX) - float(weapon_level)
+	var a_room: float = float(bias.get("armor", 0.5)) * float(GEAR_TIER_MAX) - float(armor_level)
+	var raise_weapon: bool
+	if can_w and can_a:
+		raise_weapon = w_room >= a_room
+	else:
+		raise_weapon = can_w
+	material_stock -= GEAR_UPGRADE_COST
+	if raise_weapon:
+		weapon_level += 1
+	else:
+		armor_level += 1
+	strength += GEAR_STRENGTH_BONUS
+	_apply_gear_to_members()
+	_refresh_label()
+
+func _apply_gear_to_members() -> void:
+	for n in npcs:
+		if is_instance_valid(n) and n.has_method("set_gear"):
+			n.set_gear(weapon_level, armor_level)
 
 func _roll_leader_traits() -> void:
 	var bias: Dictionary = TribeRegistry.get_archetype(archetype).get("traits", {})
@@ -285,6 +415,39 @@ func grudge_toward(other_name: String) -> float:
 
 func add_grudge(other_name: String, amount: float) -> void:
 	opinions[other_name] = clampf(grudge_toward(other_name) + amount, 0.0, 1.0)
+	# A grudge and a bond are opposite ends of ONE relationship. Growing bad blood
+	# eats into any alliance so the two can't both be high and contradict each
+	# other ("allied but at war"). Trade cools grudges (negative amount), so a
+	# steady trading partner naturally drifts from grudge toward bond.
+	if amount > 0.0 and bonds.has(other_name):
+		bonds[other_name] = maxf(0.0, float(bonds[other_name]) - amount * 1.5)
+
+# ── ALLIANCES — the positive counterpart to grudges. Built from repeated trade,
+# they make peace an actual RELATIONSHIP rather than just the absence of war.
+# Allied tribes don't raid each other and feed each other first when starving.
+# Bonds decay far slower than grudges (see _decay_opinions) so an alliance, once
+# earned, LASTS -- the whole point of "make alliances last longer". ──
+var bonds: Dictionary = {}       # tribe_name -> alliance strength 0..1
+const ALLY_THRESHOLD := 0.5      # bond at/above this = a formal alliance
+
+func bond_with(other_name: String) -> float:
+	return float(bonds.get(other_name, 0.0))
+
+func add_bond(other_name: String, amount: float) -> void:
+	bonds[other_name] = clampf(bond_with(other_name) + amount, 0.0, 1.0)
+	# a bond and a grudge can't both be strong -- warming erodes old resentment
+	if amount > 0.0 and opinions.has(other_name):
+		opinions[other_name] = maxf(0.0, float(opinions[other_name]) - amount * 0.5)
+
+func is_allied_with(other_name: String) -> bool:
+	return bond_with(other_name) >= ALLY_THRESHOLD
+
+func allies() -> Array:
+	var out: Array = []
+	for k in bonds.keys():
+		if float(bonds[k]) >= ALLY_THRESHOLD:
+			out.append(k)
+	return out
 
 # grudges and your reputation here both fade back toward neutral over time —
 # otherwise the world ratchets into permanent total war the longer a game
@@ -298,6 +461,14 @@ func _decay_opinions(delta: float) -> void:
 	for k in opinions.keys():
 		opinions[k] = move_toward(float(opinions[k]), 0.0, rate * delta)
 	player_opinion = move_toward(player_opinion, 0.0, rate * delta * 0.6)
+	# Bonds fade MUCH slower than grudges (0.15x) -- an alliance is meant to
+	# outlast the trades that built it, not evaporate the moment two tribes stop
+	# dealing for a minute. High honor slows this further, so an honourable
+	# tribe's friendships are nearly permanent. This is the core of "make
+	# alliances last longer": grudges are hot and brief, bonds are cool and durable.
+	var bond_rate: float = rate * 0.15
+	for k in bonds.keys():
+		bonds[k] = move_toward(float(bonds[k]), 0.0, bond_rate * delta)
 
 func _build() -> void:
 	# the totem: a banner the whole camp rallies behind
@@ -308,9 +479,7 @@ func _build() -> void:
 	pm.height = 3.2
 	pole.mesh = pm
 	pole.position = Vector3(0, 1.6, 0)
-	var pmat := StandardMaterial3D.new()
-	pmat.albedo_color = Color(0.4, 0.3, 0.2)
-	pole.material_override = pmat
+	pole.material_override = MatCache.flat(Color(0.4, 0.3, 0.2))
 	add_child(pole)
 
 	var banner := MeshInstance3D.new()
@@ -318,9 +487,7 @@ func _build() -> void:
 	bm.size = Vector3(1.4, 1.0, 0.06)
 	banner.mesh = bm
 	banner.position = Vector3(0, 2.6, 0)
-	var bmat := StandardMaterial3D.new()
-	bmat.albedo_color = color
-	banner.material_override = bmat
+	banner.material_override = MatCache.flat(color)
 	add_child(banner)
 
 	var col := CollisionShape3D.new()
@@ -341,6 +508,13 @@ func _build() -> void:
 	_totem_label.font_size = 32
 	add_child(_totem_label)
 
+	# every camp gets a real campfire (2026-07-19) -- the same night
+	# gathering point the player's own camp has, see campfire.gd
+	var fire := StaticBody3D.new()
+	fire.set_script(load("res://campfire.gd"))
+	add_child(fire)
+	fire.position = Vector3(2.5, 0.0, 2.5)
+
 	_build_stockpile()
 
 # every camp has its own supply pile, just like the player's — visible proof
@@ -351,9 +525,7 @@ func _build_stockpile() -> void:
 	bm.size = Vector3(2.4, 0.25, 2.4)
 	base.mesh = bm
 	base.position = Vector3(2.8, 0.125, 0)
-	var bmat := StandardMaterial3D.new()
-	bmat.albedo_color = Color(0.40, 0.28, 0.16)
-	base.material_override = bmat
+	base.material_override = MatCache.flat(Color(0.40, 0.28, 0.16))
 	add_child(base)
 
 	_stockpile_pile = MeshInstance3D.new()
@@ -361,9 +533,7 @@ func _build_stockpile() -> void:
 	pm.size = Vector3(1.6, 0.8, 1.6)
 	_stockpile_pile.mesh = pm
 	_stockpile_pile.position = Vector3(2.8, 0.65, 0)
-	var pmat := StandardMaterial3D.new()
-	pmat.albedo_color = Color(0.85, 0.7, 0.35)
-	_stockpile_pile.material_override = pmat
+	_stockpile_pile.material_override = MatCache.flat(Color(0.85, 0.7, 0.35))
 	add_child(_stockpile_pile)
 
 	_stockpile_clubs = MeshInstance3D.new()
@@ -371,9 +541,7 @@ func _build_stockpile() -> void:
 	cm.size = Vector3(0.22, 0.22, 1.0)
 	_stockpile_clubs.mesh = cm
 	_stockpile_clubs.position = Vector3(3.7, 0.5, 0)
-	var cmat := StandardMaterial3D.new()
-	cmat.albedo_color = Color(0.45, 0.30, 0.15)
-	_stockpile_clubs.material_override = cmat
+	_stockpile_clubs.material_override = MatCache.flat(Color(0.45, 0.30, 0.15))
 	add_child(_stockpile_clubs)
 
 func _update_stockpile_visual() -> void:
@@ -401,6 +569,8 @@ func _make_npc() -> Node:
 	var r := randf() * territory_radius * 0.22   # central courtyard, clear of huts
 	n.position = Vector3(cos(ang) * r, 1.0, sin(ang) * r)
 	n.setup(self, global_position, territory_radius, color)
+	if n.has_method("set_gear"):
+		n.set_gear(weapon_level, armor_level)   # arm them to the tribe's current tech
 	npcs.append(n)
 	return n
 
@@ -441,7 +611,11 @@ func damage_camp(d: float, by_player: bool, attacker = null) -> void:
 			manager.ripple_player_reputation(fallen_name)
 		var j := conquer(manager)
 		if manager and manager.has_method("notify"):
-			manager.notify("The %s camp falls! %d of their kin (and fallen) join you." % [fallen_name, j])
+			# A rival camp collapsing is a wider-world event -> "Tribes" box.
+			if manager.has_method("notify_cat"):
+				manager.notify_cat("tribes", "The %s camp falls! %d of their kin (and fallen) join you." % [fallen_name, j])
+			else:
+				manager.notify("The %s camp falls! %d of their kin (and fallen) join you." % [fallen_name, j])
 	elif attacker != null and is_instance_valid(attacker) and attacker.has_method("absorb_rival"):
 		if manager and manager.has_method("_ripple_opinions_on_defeat"):
 			manager._ripple_opinions_on_defeat(attacker, fallen_name)
@@ -536,6 +710,8 @@ func spawn_siege_raider(base_pos: Vector3) -> void:
 	n.set_script(load("res://npc.gd"))
 	add_child(n)
 	n.setup(self, global_position, territory_radius, color)   # home stays our camp
+	if n.has_method("set_gear"):
+		n.set_gear(weapon_level, armor_level)
 	var ang := randf() * TAU
 	var p := base_pos + Vector3(cos(ang), 0, sin(ang)) * randf_range(26.0, 34.0)
 	p.y = 1.0
@@ -627,6 +803,55 @@ func recruit(neutral_npc) -> void:
 var _recruiter = null         # the NPC currently walking to reach a wanderer
 var _recruit_target = null    # the wanderer they're chasing down
 var _recruit_check_accum: float = 0.0
+# ─────────────────────────────────────────────────────────────────────────────
+# RESOURCE PRESSURE — why a tribe would actually fight.
+#
+# War used to be a dice roll on a timer: _resolve_war_round picked an aggressor
+# weighted by strength x WARLIKE x aggression, with NO resource precondition, so
+# clans rushed each other for no reason but the clock. These make war a
+# CONSEQUENCE of need: a fed tribe with full stores has nothing to march for.
+# ─────────────────────────────────────────────────────────────────────────────
+
+## What this tribe must pay per growth tick to feed itself.
+func upkeep_cost() -> int:
+	var greed: float = float(leader_traits.get("greed", 0.5))
+	return int((member_count * 2 + 4) * (1.0 + greed * 0.4))
+
+## 0 = fed and comfortable, 1 = starving. The core driver of everything below.
+func hunger_pressure() -> float:
+	var need: float = maxf(1.0, float(upkeep_cost()))
+	return clampf(1.0 - (float(food) / (need * 2.0)), 0.0, 1.0)
+
+## Do we have food to spare? (what makes trade possible instead of raiding)
+func food_surplus() -> int:
+	return maxi(0, food - upkeep_cost() * 2)
+
+## Do we have our own worked material to spare? Each archetype works a DIFFERENT
+## one (see tribes/*.tribe `material:`), which is exactly what makes trade
+## between clans meaningful rather than swapping identical goods.
+func material_surplus() -> int:
+	return maxi(0, material_stock - 3)
+
+## Mirror of hunger_pressure(), but for this tribe's OWN worked material --
+## 0 = well-stocked, 1 = genuinely running low. Added 2026-07-19: "only have
+## tribes take trade if it actually makes sense -- abundance of requested and
+## scarcity of received" -- a rational trade partner wants MORE of what
+## they're short on, not just anything. Previously a rival would accept a
+## materials-for-food trade purely off food_surplus(); a tribe already
+## swimming in material_stock had no reason to want more, but accepted
+## anyway. This is the missing other half of that judgment.
+func material_pressure() -> float:
+	return clampf(1.0 - float(material_stock) / float(MATERIAL_STOCK_CAP), 0.0, 1.0)
+
+## The total reason-to-march. Hunger dominates; greed and a leader's aggression
+## only AMPLIFY a real need, they can't manufacture one out of nothing.
+func war_pressure() -> float:
+	var hunger: float = hunger_pressure()
+	var greed: float = float(leader_traits.get("greed", 0.5))
+	var aggro: float = float(leader_traits.get("aggression", 0.5))
+	# a fat, calm tribe sits at ~0 no matter how warlike its archetype
+	return hunger * (0.6 + greed * 0.5 + aggro * 0.5)
+
 func _grow() -> void:
 	if defeated or member_count >= member_cap:
 		return
@@ -733,8 +958,17 @@ func _process(delta: float) -> void:
 	# a builder emerges and raises the palisade once the tribe has utility
 	if not built and member_count >= 3 and food >= 6:
 		_build_palisade(delta)
+	# once the palisade stands and the tribe has grown wealthy enough, it
+	# upgrades to a full castle (battlements + roofed towers + roofed keep).
+	# Mutually exclusive with the palisade phase via `built`.
+	elif built and not castle_built \
+			and member_count >= CASTLE_MIN_MEMBERS \
+			and material_stock >= CASTLE_MATERIAL_COST \
+			and wood >= CASTLE_MIN_WOOD:
+		_build_castle(delta)
 
 	_tick_local_resources(delta)
+	_craft_gear_tick(delta)
 	_decay_opinions(delta)
 
 	if member_count <= 0 and npcs.is_empty():
@@ -910,6 +1144,18 @@ func _place_segment(seg: Dictionary, target: Vector3) -> void:
 		b.global_position = BlockScript.snap(target)
 		b.owner_tribe = self
 		blocks.append(b)
+	elif kind == "roof":
+		# a castle roof cap — the enclosed-building "structure with a roof". No
+		# wood cost and no snap: it sits at the exact height the plan computed
+		# (top of the walls it caps). Layer 8 / cosmetic-structural (roof.gd).
+		var rf = StaticBody3D.new()
+		rf.set_script(load("res://roof.gd"))
+		rf.set("footprint", float(seg.get("footprint", 6.0)))
+		rf.set("roof_height", float(seg.get("roof_height", 3.0)))
+		rf.set("tint", color.darkened(0.35))
+		add_child(rf)
+		rf.global_position = target
+		roofs.append(rf)
 	else:
 		var f := StaticBody3D.new()
 		f.set_script(load("res://fence.gd"))
@@ -928,6 +1174,165 @@ func _pick_builder() -> Node3D:
 			if not already:
 				return n
 	return null
+
+# ── CASTLE RAISE ── same builder-squad pattern as _build_palisade, on its
+# own plan/claim/builder state so it can run cleanly AFTER the palisade is
+# finished (which is when this is triggered). Members walk to each segment
+# and place it; when every segment is claimed and no builder is mid-walk,
+# the castle is done.
+## REAL WORKSTATION (2026-07-19): "make sure both npc and player tribes are
+## creating blacksmiths" -- a rival tribe raises its own forge the moment its
+## castle finishes (same completion event as the player's Crafting district
+## getting one, just triggered by castle-tier progress instead of a district
+## choice). Instant placement, not part of the gradual segment-by-segment
+## castle plan above -- the same shape found_outpost()'s player-side district
+## structures already use.
+func _raise_forge() -> void:
+	if forge_built:
+		return
+	forge_built = true
+	var forge := StaticBody3D.new()
+	forge.set_script(load("res://blacksmith_forge.gd"))
+	add_child(forge)
+	forge.position = Vector3(6.0, 0.0, -6.0)   # just clear of the castle keep footprint
+
+func _build_castle(delta: float) -> void:
+	if _castle_plan.is_empty():
+		_plan_castle()
+	if _castle_plan.is_empty():
+		castle_built = true
+		return
+	if _castle_builders.is_empty() and _castle_claimed.size() >= _castle_plan.size():
+		castle_built = true
+		_raise_forge()
+		return
+
+	_castle_accum -= delta
+	if _castle_accum > 0.0:
+		return
+	_castle_accum = 0.3
+
+	# drop workers who died / were called to war
+	for w in _castle_builders.duplicate():
+		var n = w["npc"]
+		if n == null or not is_instance_valid(n) or n.get("at_war"):
+			_castle_claimed.erase(w["i"])
+			_castle_builders.erase(w)
+
+	# top up the squad, each onto the next unclaimed segment
+	while _castle_builders.size() < MAX_BUILDERS:
+		var idx := _next_open_castle_segment()
+		if idx == -1:
+			break
+		var n := _pick_castle_builder()
+		if n == null:
+			break
+		_castle_claimed[idx] = true
+		n.assign_build(global_position + (_castle_plan[idx]["pos"] as Vector3))
+		_castle_builders.append({"npc": n, "i": idx})
+
+	# place for anyone who's arrived (HORIZONTAL distance only — castle
+	# pieces sit several courses up, same reasoning as _build_palisade)
+	for w in _castle_builders.duplicate():
+		var n = w["npc"]
+		var idx: int = w["i"]
+		var seg: Dictionary = _castle_plan[idx]
+		var target: Vector3 = global_position + (seg["pos"] as Vector3)
+		var gp: Vector3 = (n as Node3D).global_position
+		if Vector2(gp.x - target.x, gp.z - target.z).length() > 1.7:
+			continue
+		_place_segment(seg, target)
+		n.cancel_build()
+		_castle_builders.erase(w)
+
+func _next_open_castle_segment() -> int:
+	for i in range(_castle_plan.size()):
+		if not _castle_claimed.has(i):
+			return i
+	return -1
+
+func _pick_castle_builder() -> Node3D:
+	for n in npcs:
+		if is_instance_valid(n) and not n.get("at_war") and not n.get("building"):
+			var already := false
+			for w in _castle_builders:
+				if w["npc"] == n:
+					already = true
+					break
+			if not already:
+				return n
+	return null
+
+# Lay out the castle as an UPGRADE of the already-built palisade block wall:
+#   • BATTLEMENTS — a 3rd course of merlons (every other perimeter cell) on
+#     the existing curtain wall, giving it a crenellated top.
+#   • CORNER TOWERS — a small roof cap on each of the four wall corners
+#     (the corners already stand 3 courses tall from the merlon course).
+#   • KEEP — a central 3x3 ring of blocks, two courses, capped by a ROOF:
+#     the enclosed, roofed building the whole feature is really about.
+# Uses the SAME grid geometry and gate angles as the palisade's block wall
+# (_grid_square_wall, called from _plan_fences with r = territory_radius*0.6
+# and gate_count 2) so the merlons land exactly on the existing wall and the
+# gate openings still line up.
+func _plan_castle() -> void:
+	var segs: Array = []
+	var size: float = BlockScript.SIZE
+	var r: float = territory_radius * 0.6
+	var half: float = r * 1.4
+	var n: int = maxi(2, int(round(half / size)))
+
+	# gate angles must match _plan_fences (gate_count = 2)
+	var gate_angles: Array = []
+	for g in range(2):
+		gate_angles.append(TAU * float(g) / 2.0)
+
+	# battlement merlons on the existing curtain wall (3rd course, y = 5)
+	for gx in range(-n, n + 1):
+		for gz in range(-n, n + 1):
+			if abs(gx) != n and abs(gz) != n:
+				continue   # perimeter only
+			var x := float(gx) * size
+			var z := float(gz) * size
+			if _near_gate(atan2(z, x), gate_angles):
+				continue
+			if (gx + gz) % 2 == 0:   # crenellation: every other cell
+				segs.append({"kind": "block", "pos": Vector3(x, 5.0, z)})
+
+	# roofed corner towers — the four wall corners already stand 3 courses
+	# tall (base courses from the palisade + the corner merlon above), so a
+	# roof cap at y = 6 turns each corner into a little turret.
+	var c: float = float(n) * size
+	for cx in [-c, c]:
+		for cz in [-c, c]:
+			segs.append({"kind": "roof", "pos": Vector3(cx, 6.0, cz),
+				"footprint": 3.5, "roof_height": 2.0})
+
+	# central KEEP — a 3x3 ring of blocks, two courses, offset north of the
+	# totem/stockpile so it doesn't overlap them, capped with a roof. This
+	# is the enclosed, roofed building.
+	var kc := Vector3(0.0, 0.0, -6.0)
+	for kx in [-2.0, 0.0, 2.0]:
+		for kz in [-2.0, 0.0, 2.0]:
+			if kx == 0.0 and kz == 0.0:
+				continue   # hollow interior
+			segs.append({"kind": "block", "pos": Vector3(kc.x + kx, 1.0, kc.z + kz)})
+			segs.append({"kind": "block", "pos": Vector3(kc.x + kx, 3.0, kc.z + kz)})
+	# roof sits on top of the keep's two courses (tops at y = 4)
+	segs.append({"kind": "roof", "pos": Vector3(kc.x, 4.0, kc.z),
+		"footprint": 7.0, "roof_height": 3.0})
+
+	_castle_plan = segs
+
+	# The tribe INVESTS to raise the castle: spend banked material culture as
+	# the gate cost, and grant the timber the raise needs (AI tribes have no
+	# per-tick wood income, so without this an established tribe could never
+	# actually finish it).
+	material_stock = maxi(0, material_stock - CASTLE_MATERIAL_COST)
+	var block_count := 0
+	for s in segs:
+		if String(s.get("kind", "")) == "block":
+			block_count += 1
+	wood += block_count
 
 # true everywhere a ring of segments gets built around camp (radians of
 # angular clearance to either side of a gate angle counts as "the gate")
@@ -1065,12 +1470,30 @@ func defeat() -> void:
 	queue_free()
 
 # a member fell — the tribe weakens and remembers
-func on_member_died(n) -> void:
+func on_member_died(n, attacker = null) -> void:
 	npcs.erase(n)
 	member_count = maxi(0, member_count - 1)
 	deaths += 1
 	if leader == n:
 		leader = null
+	# MURDER RIVALRY (2026-07-19): the reverse direction of Tribemanager's own
+	# on_member_died -- the PLAYER's side killed one of THIS tribe's members.
+	# Souring player_opinion here is what a rival tribe's own greeting/raid
+	# logic already reads (see the tier ladder at the top of this file); the
+	# player's own Tribemanager gets the matching add_rivalry() so the feud is
+	# recorded on both sides, not just felt by the one who was hit.
+	if attacker != null and is_instance_valid(attacker):
+		var is_player_side: bool = attacker.is_in_group("tribe") or attacker.is_in_group("player")
+		if is_player_side:
+			player_opinion = clampf(player_opinion - MURDER_OPINION_HIT, -1.0, 1.0)
+			# a tribemember carries their own `manager` ref; the player
+			# themselves (FPSPlayer) doesn't, so fall back to the one real
+			# Tribemanager in the scene, same as other player-attributed effects
+			var mgr = attacker.get("manager") if "manager" in attacker else null
+			if mgr == null and attacker.get_tree() != null:
+				mgr = attacker.get_tree().get_first_node_in_group("tribe_manager")
+			if mgr != null and is_instance_valid(mgr) and mgr.has_method("add_rivalry"):
+				mgr.add_rivalry(tribe_name, MURDER_RIVALRY_HIT)
 
 # ── leadership: re-elect every 4s from whoever has the highest contrib ──
 func _elect_leader() -> void:
@@ -1119,7 +1542,10 @@ func _refresh_label() -> void:
 			siege = "\n⚒ %d/%d teepees standing · stockpile %s" % [
 				teepees.size(), built_teepee_count,
 				"DESTROYED" if stockpile_destroyed else "%d%%" % int(stockpile_hp / maxf(1.0, stockpile_max_hp) * 100.0)]
-		_totem_label.text = "%s  [%d]\n%s · str %d · works %s (%d)%s%s%s%s" % [
-			tribe_name, member_count, archetype, strength, material_name(), material_stock, champ, stance, cmd, siege]
+		var gear := ""
+		if weapon_level > 0 or armor_level > 0:
+			gear = "  ⚔%d/🛡%d" % [weapon_level, armor_level]
+		_totem_label.text = "%s  [%d]\n%s · str %d · works %s (%d)%s%s%s%s%s" % [
+			tribe_name, member_count, archetype, strength, material_name(), material_stock, gear, champ, stance, cmd, siege]
 	else:
 		_totem_label.text = "%s\n(unscouted)" % tribe_name

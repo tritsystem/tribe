@@ -69,6 +69,9 @@ func _ready() -> void:
 	# a resident crafts from their OWN settlement's local materials now, not
 	# the shared camp's -- fund the settlement directly rather than mgr.materials.
 	mgr.outposts[1].local_materials = 100
+	# 2026-07-19: craft_weapon() now gates tiers above 0 on real Blacksmithing
+	# practice (see practice_profession() in tribemember.gd) -- grant it here.
+	crafter.profession_skill["Blacksmithing"] = 25.0
 	var before_mats: int = mgr.outposts[1].local_materials
 	crafter.craft_weapon(1)
 	var spent: int = before_mats - mgr.outposts[1].local_materials

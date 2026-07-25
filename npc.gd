@@ -12,6 +12,7 @@ extends CharacterBody3D
 # ─────────────────────────────────────────────────────────────────────────────
 
 const SpatialGrid = preload("res://spatial_grid.gd")
+const WC = preload("res://water_crossing.gd")   # shared boat-crossing state machine
 
 var brain: Spikeling
 var anim: BodyAnim
@@ -57,6 +58,40 @@ var contrib: int = 0           # productivity score → who becomes tribe leader
 var grudges: Dictionary = {}
 var experience: int = 0
 var warrior: bool = false      # marched out to war on a rival camp
+
+# ── WEAPONS & ARMOR ──────────────────────────────────────────────────────────
+# Tribes forge gear from the materials they accumulate (world_tribe crafting).
+# A member's weapon multiplies the damage they DEAL; their armor reduces the
+# damage they TAKE. Both default to the baseline (Club / no armor). The tribe
+# pushes a whole-roster tech level down via set_gear() as it gets wealthier —
+# see world_tribe._craft_gear_tick(). Kept as small const tables + two int
+# fields so this stays data-light and cheap at 1000 tribes.
+const WEAPON_TIERS := [
+	{"name": "Club",  "mult": 1.0},   # wood — baseline
+	{"name": "Spear", "mult": 1.4},   # wood + stone — longer reach
+	{"name": "Bow",   "mult": 1.6},   # wood + skins — ranged-ish
+	{"name": "Axe",   "mult": 1.8},   # ore — heaviest hitter
+]
+const ARMOR_TIERS := [
+	{"name": "None",  "reduction": 0.0},
+	{"name": "Hide",  "reduction": 0.15},   # skins
+	{"name": "Bone",  "reduction": 0.30},   # stone/bone
+	{"name": "Metal", "reduction": 0.45},   # ore
+]
+var weapon: int = 0    # index into WEAPON_TIERS
+var armor: int = 0     # index into ARMOR_TIERS
+
+func weapon_mult() -> float:
+	return float(WEAPON_TIERS[clampi(weapon, 0, WEAPON_TIERS.size() - 1)]["mult"])
+
+func armor_reduction() -> float:
+	return float(ARMOR_TIERS[clampi(armor, 0, ARMOR_TIERS.size() - 1)]["reduction"])
+
+# the tribe upgrades our gear as it accumulates the right materials
+func set_gear(w: int, a: int) -> void:
+	weapon = clampi(w, 0, WEAPON_TIERS.size() - 1)
+	armor = clampi(a, 0, ARMOR_TIERS.size() - 1)
+	_apply_gear_visual()
 var _champion: bool = false
 var _club_model: MeshInstance3D = null
 var _hp_bar: Label3D = null
@@ -85,6 +120,12 @@ var _war_formation_offset: Vector3 = Vector3.ZERO   # holds a formation slot whi
 var _war_reach: float = 4.0     # how close to the objective before we strike it
 var _war_time: float = 0.0      # patience before we give up and march home
 var _bash_cd: float = 0.0
+# ── INTER-ISLAND RAIDS: a war party crossing water by boat, same mechanic as
+# trade_envoy.gd, via the shared water_crossing.gd helper. Lazily created the
+# first time a raid march actually meets the sea; null (and untouched) on
+# continuous maps, where path_crosses_water is always false. ──
+const RAID_BOAT_WOOD := 8        # wood the RAIDING tribe spends per boat
+var _crossing = null             # WaterCrossing instance while crossing, else null
 var _last_pos: Vector3 = Vector3.ZERO
 var _war_foe_cd: float = 0.0    # throttles _war_foe()'s full-group scan
 var _war_foe_cache: Node3D = null
@@ -128,6 +169,32 @@ func set_lod(tier: int) -> void:
 	lod = tier
 	set_physics_process(tier != 2)
 
+# ── NEUTRAL SELF-LOD — neutral wanderers have no tribe, so world_tribe._tick_lod
+# never manages them; without this every neutral runs full physics_process
+# forever regardless of distance (at Epic that's ~70 bodies, the single largest
+# block of stragglers keeping the frame over budget). Mirror animal.gd: a cheap
+# ~0.5s distance poll in _process (which keeps ticking while physics is off)
+# freezes a neutral beyond NEUTRAL_LOD_FAR and re-wakes it when the player nears.
+# Tribe members return immediately — their tribe owns their LOD.
+const NEUTRAL_LOD_FAR := 85.0
+var _neutral_lod_accum: float = 0.0
+
+func _process(delta: float) -> void:
+	if not neutral:
+		return
+	_neutral_lod_accum -= delta
+	if _neutral_lod_accum > 0.0:
+		return
+	_neutral_lod_accum = randf_range(0.4, 0.6)
+	var p := get_tree().get_first_node_in_group("player") as Node3D
+	if p == null or not is_instance_valid(p):
+		return
+	var far: bool = global_position.distance_to(p.global_position) > NEUTRAL_LOD_FAR
+	if far == is_physics_processing():
+		set_physics_process(not far)
+		if far:
+			_tick_accum = 0.0
+
 var _grid_cd: float = 0.0
 
 func _exit_tree() -> void:
@@ -150,6 +217,11 @@ func cancel_build() -> void:
 func _ready() -> void:
 	add_to_group("npc")
 	add_to_group("has_brain")
+	# glue to the surface on slopes (see tribemember._setup_slope_walking) --
+	# without floor_snap a rival launches off every terrain lip and stalls
+	floor_snap_length = 0.8
+	floor_max_angle = deg_to_rad(54.0)
+	floor_constant_speed = true
 	brain = Spikeling.new()
 	brain.load_from_text(BRAIN)
 	_build()
@@ -242,9 +314,7 @@ func _build() -> void:
 	cap.height = 1.6
 	body.mesh = cap
 	body.position = Vector3(0, 0.9, 0)
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = color
-	body.material_override = mat
+	body.material_override = MatCache.flat(color)
 	add_child(body)
 	_build_googly_eyes(body, 0.35, 0.55)   # no separate head sphere — bias up toward the capsule top
 
@@ -263,9 +333,7 @@ func _build() -> void:
 	_club_model.mesh = clm
 	_club_model.position = Vector3(0.3, 1.0, 0.25)
 	_club_model.rotation_degrees = Vector3(60, 0, 0)
-	var cmat := StandardMaterial3D.new()
-	cmat.albedo_color = Color(0.45, 0.30, 0.15)
-	_club_model.material_override = cmat
+	_club_model.material_override = MatCache.flat(Color(0.45, 0.30, 0.15))
 	_club_model.visible = false
 	add_child(_club_model)
 
@@ -307,9 +375,8 @@ func _build_googly_eyes(parent: Node3D, head_radius: float, height_offset: float
 		es.height = head_radius * 0.64
 		eye.mesh = es
 		eye.position = Vector3(side * head_radius * 0.55, head_radius * 0.25 + height_offset, head_radius * 0.85)
-		var emat := StandardMaterial3D.new()
-		emat.albedo_color = Color(1, 1, 1)
-		eye.material_override = emat
+		eye.material_override = MatCache.flat(Color(1, 1, 1))
+		eye.add_to_group("googly_eye")   # decorative → far-culled centrally
 		parent.add_child(eye)
 
 		var pupil := MeshInstance3D.new()
@@ -318,17 +385,13 @@ func _build_googly_eyes(parent: Node3D, head_radius: float, height_offset: float
 		ps.height = head_radius * 0.28
 		pupil.mesh = ps
 		pupil.position = Vector3(randf_range(-0.04, 0.04), randf_range(-0.04, 0.04), head_radius * 0.3)
-		var pmat := StandardMaterial3D.new()
-		pmat.albedo_color = Color(0.05, 0.05, 0.05)
-		pupil.material_override = pmat
+		pupil.material_override = MatCache.flat(Color(0.05, 0.05, 0.05))
 		eye.add_child(pupil)
 
 func _apply_color() -> void:
 	var mi := get_node_or_null("Mesh") as MeshInstance3D
 	if mi:
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = color
-		mi.material_override = mat
+		mi.material_override = MatCache.flat(color)
 
 func _physics_process(delta: float) -> void:
 	# MID tier used to skip whole physics_process calls and replay them with
@@ -382,11 +445,8 @@ func _check_stuck(delta: float) -> void:
 		# bash a fence (or a built block wall) we're snagged on, and shove
 		# free — teepees are walk-through (see teepee.gd), so they're not a
 		# movement obstacle in the first place
-		for grp in ["fence", "block"]:
-			for f in get_tree().get_nodes_in_group(grp):
-				var fn := f as Node3D
-				if fn and is_instance_valid(fn) and global_position.distance_to(fn.global_position) < 1.9 and fn.has_method("take_damage"):
-					fn.take_damage(3)
+		# don't bash walls to escape (raiders were wrecking structures, and now
+		# walls are on collision layer 4 that AI phases through anyway -- block.gd)
 		var a := randf() * TAU
 		velocity.x += cos(a) * speed * 2.0
 		velocity.z += sin(a) * speed * 2.0
@@ -407,6 +467,34 @@ func _npc_hunger(delta: float) -> void:
 			if hp <= 0.0:
 				die()
 
+# cheap visible tell: the held weapon changes color/size by tier (pooled
+# MatCache materials, so no per-instance allocation), and a metal-armored
+# member takes on a faint steely tint over the tribe color.
+const _WEAPON_COLORS := [
+	Color(0.45, 0.30, 0.15),   # Club — wood brown
+	Color(0.55, 0.42, 0.22),   # Spear — pale shaft
+	Color(0.35, 0.24, 0.12),   # Bow — dark wood
+	Color(0.55, 0.57, 0.62),   # Axe — grey metal head
+]
+
+func _apply_gear_visual() -> void:
+	if _club_model:
+		var wc: Color = _WEAPON_COLORS[clampi(weapon, 0, _WEAPON_COLORS.size() - 1)]
+		_club_model.material_override = MatCache.flat(wc)
+		# a bow/spear reads as longer, an axe as chunkier — a quick silhouette cue
+		var s := 1.0 + 0.25 * float(weapon)
+		_club_model.scale = Vector3(1.0, 1.0, s)
+	var mi := get_node_or_null("Mesh") as MeshInstance3D
+	if mi:
+		var body_col := color
+		if armor >= 3:
+			body_col = color.lerp(Color(0.62, 0.64, 0.70), 0.45)   # steel-plated
+		elif armor == 2:
+			body_col = color.lerp(Color(0.80, 0.78, 0.70), 0.22)   # bone/stone plates
+		elif armor == 1:
+			body_col = color.lerp(Color(0.55, 0.40, 0.28), 0.20)   # hide wraps
+		mi.material_override = MatCache.flat(body_col)
+
 func _update_combat_visuals() -> void:
 	if _club_model:
 		_club_model.visible = (not neutral) and tribe != null and is_instance_valid(tribe) and tribe.has_club()
@@ -419,12 +507,14 @@ func _update_combat_visuals() -> void:
 			_hp_bar.visible = false
 
 func take_hit(dmg: float, attacker) -> void:
+	# armor soaks a fraction of every incoming blow before it lands
+	dmg *= (1.0 - armor_reduction())
 	hp -= dmg
 	if anim:
 		anim.pop(0.5)
 		anim.tension = 1.0
 	if hp <= 0.0:
-		die()
+		die(attacker)
 		return
 	if hp < max_hp * 0.3 and attacker:
 		# badly hurt — break off and run regardless of anything else
@@ -467,9 +557,9 @@ func _nearby_rival_count() -> int:
 		count += 1
 	return count
 
-func die() -> void:
+func die(attacker = null) -> void:
 	if tribe and is_instance_valid(tribe) and tribe.has_method("on_member_died"):
-		tribe.on_member_died(self)
+		tribe.on_member_died(self, attacker)
 	queue_free()
 
 # ── one spiking tick: feed senses in, read drives out ──
@@ -481,8 +571,14 @@ func _brain_tick() -> void:
 	# whole roster (world_tribe.gd._tick_hive_brain). Stimulating/stepping
 	# it again here, per-NPC, would advance the shared network N times per
 	# tick instead of once, so members just read the result instead.
-	if not neutral and tribe != null and is_instance_valid(tribe) and "hive_alarmed" in tribe:
-		if tribe.hive_alarmed:
+	if not neutral and tribe != null and is_instance_valid(tribe):
+		# The tribe's ONE brain is stepped once per tick in world_tribe.gd
+		# (_tick_hive_brain), which already folds in "is the player near ANY
+		# member". A member NEVER stimulates/steps the shared net itself —
+		# doing so would advance it N times per tick and re-allocate the fired
+		# array per NPC. We just read the tribe's result.
+		var alarmed: bool = tribe.hive_alarmed
+		if alarmed:
 			_flee_timer = 1.3
 			_flee_from = _player
 			if anim: anim.pop(0.6)
@@ -520,7 +616,11 @@ func _move(delta: float) -> void:
 	# AT WAR — a mustered raider overrides everything to march on the objective
 	# and fight there. This is what a coordinated raid looks like on the ground.
 	if at_war:
-		_war_move(delta)
+		# _war_move returns true when it is ferrying the raider across water — in
+		# that leg it welds the body to the boat via global_position, so we skip
+		# separation + move_and_slide (they'd apply gravity and sink it off the deck).
+		if _war_move(delta):
+			return
 		_apply_separation()
 		move_and_slide()
 		return
@@ -642,8 +742,16 @@ func _find_intruder() -> Node3D:
 		# territory genuinely stops being hostile ground.
 		var in_territory: bool = home.distance_to(p.global_position) < territory and not friendly
 		var too_close: bool = dp < 6.0 and not friendly
+		# ATTACK ON SIGHT when there's real bad blood. This already existed at
+		# opinion <= -0.3 but only within the same 18m scan as everything else, so
+		# a hostile tribe still had to nearly bump into you. A tribe that hates you
+		# now spots you from much farther and comes for you -- "bad rep = they hunt
+		# you" made visible. The angrier they are, the farther they see.
 		var hostile_to_player: bool = _raid_player or opinion <= -0.3
-		if (in_territory or too_close or hostile_to_player) and dp < bd:
+		var sight: float = bd
+		if hostile_to_player:
+			sight = maxf(bd, 34.0 + 20.0 * clampf(-opinion, 0.0, 1.0))  # 34..54m
+		if (in_territory or too_close or hostile_to_player) and dp < sight:
 			bd = dp
 			best = p
 	for o in SpatialGrid.query(global_position, bd, "npc"):
@@ -906,6 +1014,7 @@ func _attack(foe) -> void:
 		dmg += 8.0   # armed hits harder
 	if tribe and is_instance_valid(tribe) and tribe.get("leader") == self:
 		dmg += 6.0   # the elected leader fights harder, not just looks the part
+	dmg *= weapon_mult()   # a better weapon swings for more
 	if foe.has_method("take_hit"):
 		var foe_hp = foe.get("hp")
 		if foe_hp != null and float(foe_hp) - dmg <= 0.0:
@@ -930,6 +1039,7 @@ func _try_throw_at(foe) -> bool:
 	if f.length() > 0.01:
 		rotation.y = lerp_angle(rotation.y, atan2(f.x, f.z), 0.5)
 	var dmg := 10.0 + float(int(tribe.strength) % 10)
+	dmg *= weapon_mult()   # a bow/spear throws harder than a plain club
 	if foe.has_method("take_hit"):
 		foe.take_hit(dmg, self)
 	return true
@@ -962,14 +1072,44 @@ func end_war() -> void:
 	at_war = false
 	_raid_player = false
 	_war_tribe = null
+	# never leave a boat leaked or a raider bobbing at sea when a raid ends
+	if _crossing != null:
+		_crossing.abort()
+		_crossing = null
 	state = St.WANDER
 
-func _war_move(delta: float) -> void:
+# Returns true only while FERRYING across water (the raider is welded to the boat
+# via global_position, so the caller must skip its own physics that frame). All
+# other paths return false — normal on-foot war-march, unchanged on land maps.
+func _war_move(delta: float) -> bool:
 	_war_time -= delta
 	var target_gone: bool = (not _raid_player) and (_war_tribe == null or not is_instance_valid(_war_tribe) or _war_tribe.defeated)
 	if _war_time <= 0.0 or target_gone:
-		end_war()
-		return
+		end_war()   # end_war() aborts any crossing (frees boat, lands the raider)
+		return false
+
+	# ── BOAT CROSSING (island maps only) ────────────────────────────────────
+	# Mid-ferry: ride the boat straight across, ignoring combat and marching —
+	# we're at sea, there's nothing to fight and nowhere to walk.
+	if _crossing != null and _crossing.state == WC.FERRY:
+		if _crossing.tick_ferry(delta):
+			_halt()
+			return true          # still at sea — skip move_and_slide
+		return false             # just landed on the far shore — resume marching
+	# Walking to the embark shore: head straight there past any distraction, then
+	# launch the boat on arrival. Formation/foe logic is suspended for the run to
+	# the water (the sea gap is open — no defenders out there to fight).
+	if _crossing != null and _crossing.state == WC.TO_SHORE:
+		var emb: Vector3 = _crossing.embark
+		var tos := emb - global_position
+		tos.y = 0.0
+		if tos.length() > 1.6:
+			_drive(tos.normalized(), hunt_speed)
+		else:
+			_halt()
+			_crossing.launch()
+		return false
+
 	# 1) cut down any enemy fighter blocking the advance
 	# (full-group scan is expensive — refresh it a few times a second, not
 	#  every physics frame; re-validate the cached target in between)
@@ -988,7 +1128,29 @@ func _war_move(delta: float) -> void:
 			_halt()
 		elif tf.length() > 0.01:
 			_drive(tf.normalized(), hunt_speed)
-		return
+		return false
+
+	# ── does the march to the objective cross the sea? If so, stage a boat
+	# crossing (island maps only). _war_pos is the enemy camp / player base,
+	# which sits on the far island, so it's the point we test the route against.
+	# On continuous maps path_crosses_water is always false, so begin() returns
+	# 0 and this is a no-op — the war-march is byte-for-byte unchanged. ──
+	if _crossing == null or _crossing.state == WC.OFF:
+		var res: int = _try_war_crossing(_war_pos)
+		if res == -1:
+			# can't afford a boat / no sea route — abandon the raid rather than
+			# march into the water or hang. Turn for home (normal life resumes).
+			end_war()
+			return false
+		if res == 1:
+			# staged this frame — start walking to the embark shore immediately
+			var emb2: Vector3 = _crossing.embark
+			var toe := emb2 - global_position
+			toe.y = 0.0
+			if toe.length() > 0.01:
+				_drive(toe.normalized(), hunt_speed)
+			return false
+
 	# 2) press toward the objective
 	if _raid_player:
 		# Siege order: fences must fall before camps, camps before the
@@ -1002,7 +1164,7 @@ func _war_move(delta: float) -> void:
 		var target := _siege_cache
 		if target == null:
 			_halt()
-			return
+			return false
 		var td := (target as Node3D).global_position - global_position
 		td.y = 0.0
 		if td.length() > 1.8:
@@ -1015,7 +1177,7 @@ func _war_move(delta: float) -> void:
 				_bash_cd = 0.5
 				if target.has_method("take_damage"):
 					target.take_damage(8.0, tribe)
-		return
+		return false
 	# hold formation while still marching; once within striking range of the
 	# objective, converge on the real point so everyone can actually reach it
 	var formation_pos := _war_pos + _war_formation_offset
@@ -1035,6 +1197,51 @@ func _war_move(delta: float) -> void:
 				if tribe and is_instance_valid(tribe) and tribe.has_club():
 					dmg += 4.0   # an armed war party cracks a totem faster
 				_war_tribe.damage_camp(dmg, false, tribe)
+	return false
+
+# The raiding tribe (our own tribe) accesses its manager for the water-nav
+# primitives (path_crosses_water / shoreline_toward / far_shore / ground_y).
+func _war_manager():
+	if tribe != null and is_instance_valid(tribe):
+		return tribe.get("manager")
+	return null
+
+# Lazily build the crossing helper and try to stage a boat crossing toward
+# `goal`. Passes a charge Callable so the raiding tribe pays wood per boat (and
+# the crossing is refused if the tribe is broke). Returns begin()'s code:
+#   0 no crossing needed, 1 staged, -1 abort (unaffordable / no route).
+func _try_war_crossing(goal: Vector3) -> int:
+	var mgr = _war_manager()
+	if mgr == null or not mgr.has_method("path_crosses_water"):
+		return 0   # no manager (e.g. a lone/neutral edge case) — just walk
+	# Cheap gate FIRST so the helper is never even allocated on continuous maps
+	# (island_mode off -> always false): a land-map war-march stays byte-for-byte
+	# unchanged, _crossing stays null forever.
+	if not mgr.path_crosses_water(global_position, goal):
+		return 0
+	if _crossing == null:
+		_crossing = WC.new()
+		_crossing.setup(self, mgr)
+	return _crossing.begin(global_position, goal, Callable(self, "_charge_war_boat"))
+
+# Spend the raiding tribe's wood on a boat. Returns false (crossing aborts) when
+# the tribe can't afford it, so a poor tribe's over-water raid is called off
+# cleanly instead of stranding raiders at the shore.
+func _charge_war_boat() -> bool:
+	var t = tribe
+	if t == null or not is_instance_valid(t):
+		return false
+	var w: int = int(t.get("wood"))
+	if w < RAID_BOAT_WOOD:
+		var mgr = _war_manager()
+		if mgr != null and mgr.has_method("notify_cat"):
+			mgr.notify_cat("tribes", "🪵 The %s can't afford a boat — their raid across the water is called off." % str(t.get("tribe_name")))
+		return false
+	t.set("wood", w - RAID_BOAT_WOOD)
+	var mgr2 = _war_manager()
+	if mgr2 != null and mgr2.has_method("notify_cat"):
+		mgr2.notify_cat("tribes", "⛵ The %s build a boat (%d wood) to raid across the water." % [str(t.get("tribe_name")), RAID_BOAT_WOOD])
+	return true
 
 # who a raider strikes: player-side units when sieging the base, otherwise the
 # camp's defenders (and any guard dogs)

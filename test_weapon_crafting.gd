@@ -16,9 +16,12 @@ func _ready() -> void:
 	print("=".repeat(60))
 
 	# scenario A: enough materials -> the exact requested tier is set
+	# (2026-07-19: craft_weapon() now gates tiers above 0 on real Blacksmithing
+	# practice -- see practice_profession()/SKILL_TIER_STEP in tribemember.gd)
 	var m1 := _spawn_member()
 	m1.manager = _fake_manager(true)
 	m1.weapon = 0
+	m1.profession_skill["Blacksmithing"] = 25.0
 	var ok1: bool = m1.craft_weapon(1)   # 1 == Spear
 	_check("craft_weapon(1) succeeds with materials available", ok1)
 	_check("...and sets the EXACT requested tier (Spear), not a random one",
@@ -35,6 +38,7 @@ func _ready() -> void:
 	# scenario C: out-of-range tier index is clamped, not crashed
 	var m3 := _spawn_member()
 	m3.manager = _fake_manager(true)
+	m3.profession_skill["Blacksmithing"] = 100.0
 	var ok3: bool = m3.craft_weapon(99)
 	_check("an out-of-range tier index is clamped rather than crashing", ok3)
 	_check("...clamped to the last real tier (Axe, index 3)", m3.weapon == 3)

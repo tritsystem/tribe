@@ -51,11 +51,16 @@ func _ready() -> void:
 	neutral.queue_free()
 	SpatialGrid.remove(neutral)
 
-	# scenario D: hostile far enough to be heard, not seen
-	var distant := _spawn_fake(member.global_position + Vector3(0, 0, 18), "npc")
+	# scenario D: hostile far enough to be heard, not seen. Distance is derived
+	# from the member's own live constants (SIGHT_RADIUS was raised 2026-07-19
+	# for the "npcs need a bigger field of view" fix) rather than a hardcoded
+	# literal, so this scenario stays meaningful even if either radius tunes
+	# again later -- it just needs to sit strictly between the two.
+	var d_dist: float = (member.SIGHT_RADIUS + member.HEARING_RADIUS) / 2.0
+	var distant := _spawn_fake(member.global_position + Vector3(0, 0, d_dist), "npc")
 	member._sense_environment()
-	var d_label: String = "hostile at 18m (beyond SIGHT_RADIUS=%.0f, within HEARING_RADIUS=%.0f) -> sees_raider false" % [
-		member.SIGHT_RADIUS, member.HEARING_RADIUS]
+	var d_label: String = "hostile at %.0fm (beyond SIGHT_RADIUS=%.0f, within HEARING_RADIUS=%.0f) -> sees_raider false" % [
+		d_dist, member.SIGHT_RADIUS, member.HEARING_RADIUS]
 	_check(d_label, member.sees_raider == false)
 	_check("...but hears_danger true", member.hears_danger == true)
 	distant.queue_free()

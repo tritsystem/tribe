@@ -25,6 +25,19 @@ var gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity", 9
 # survival
 var manager
 var hunger: float = 0.0
+
+## INVENTORY (2026-07-19): "add npc and player inventory" -- mirrors
+## tribemember.gd's own inventory (item name -> count). Populated by
+## personally mined ore/stone/gems (see mineral.gd's player-only _harvest())
+## on top of whatever gets banked in the shared stockpile.
+var inventory: Dictionary = {}
+
+func add_item(item: String, n: int = 1) -> void:
+	inventory[item] = int(inventory.get(item, 0)) + n
+
+func item_count(item: String) -> int:
+	return int(inventory.get(item, 0))
+
 const HUNGER_RATE := 0.9          # gentler — easier to keep fed
 const EAT_AT := 60.0
 const EAT_RESTORE := 62.0
@@ -51,8 +64,27 @@ var _cam_base_pos: Vector3 = Vector3.ZERO
 var _hurt_flash: float = 0.0            # 1.0 on hit, fades -> red damage vignette
 var _hurt_overlay: ColorRect = null
 
+# ── WATER: swimming + a player-built boat (island maps only) ──
+const SWIM_SPEED := 3.0        # horizontal paddle speed (slower than walking's 5)
+const SWIM_VERT := 3.5         # max up/down swim speed (and the clamp on bobbing)
+const BUOYANCY := 9.0          # upward accel per metre of depth — floats you to the surface
+const WATER_VDRAG := 10.0      # vertical drag so you never rocket up or plummet
+const PLAYER_BOAT_WOOD := 6    # wood cost to launch a boat
+const BOAT_SPEED := 8.0        # how fast the boat sails
+var _boat: MeshInstance3D = null
+var _on_boat: bool = false
+
 func _ready() -> void:
 	add_to_group("player")
+	# walk hills smoothly: snap to the surface so you don't bounce down slopes,
+	# and allow a steeper climb before it counts as a wall (see terrain work)
+	floor_snap_length = 0.8
+	floor_max_angle = deg_to_rad(54.0)
+	floor_constant_speed = true
+	# collide with STRUCTURES (layer 4): walls/fences still physically block YOU
+	# (siege feel + your own gated camp), even though AI phases through them so it
+	# can't jam. See block.gd.
+	set_collision_mask_value(4, true)
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_target_yaw = rotation.y
 	_target_pitch = 0.0
@@ -81,9 +113,7 @@ func _build_club_model() -> void:
 	var m := BoxMesh.new()
 	m.size = Vector3(0.08, 0.08, 0.7)
 	_club_model.mesh = m
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.45, 0.30, 0.15)
-	_club_model.material_override = mat
+	_club_model.material_override = MatCache.flat(Color(0.45, 0.30, 0.15))
 	_club_model.position = Vector3(0.35, -0.30, -0.6)
 	_club_model.rotation_degrees = Vector3(-20, 0, 0)
 	_club_model.visible = false
@@ -91,6 +121,11 @@ func _build_club_model() -> void:
 		camera.add_child(_club_model)
 
 func _unhandled_input(event: InputEvent) -> void:
+	# CHAT GATE: while the chat box is open we read NO input at all. This reads
+	# raw keys/mouse, so without the gate typing "we should hunt" would walk you
+	# across camp (W), carve a club (C), and swing (LMB) as you type.
+	if TribeChat.open or TribeTradeUI.open or TribeTradeMenu.open or TribeOverview.open or TribeInventoryUI.open:
+		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_target_yaw -= event.relative.x * mouse_sensitivity
 		_target_pitch = clampf(_target_pitch - event.relative.y * mouse_sensitivity, -1.4, 1.4)
@@ -133,17 +168,50 @@ func _physics_process(delta: float) -> void:
 
 	_survival(delta)
 
+	# CHAT GATE: no movement/jump keys while typing (gravity + move_and_slide still
+	# run below, so you settle on the ground instead of freezing mid-air)
+	var chatting: bool = TribeChat.open or TribeTradeUI.open or TribeTradeMenu.open or TribeOverview.open or TribeInventoryUI.open
+
+	# ── WATER dispatch (island maps only; a non-island / no-terrain map skips ALL of
+	# this and drops straight to the unchanged walk path below). ──
+	var terr = null
+	if manager != null:
+		terr = manager.get("terrain")
+	var island: bool = terr != null and is_instance_valid(terr) and terr.get("island_mode") == true
+
+	if island and not chatting and _key_just(KEY_R):
+		if _on_boat:
+			_exit_boat(terr)
+		else:
+			_build_boat(terr)
+
+	if _on_boat and is_instance_valid(_boat):
+		_drive_boat(terr, delta, chatting)
+		return
+	elif _on_boat:
+		_on_boat = false   # boat was freed out from under us — fall through to swim/walk
+
+	if island:
+		var wl: float = float(terr.get("water_level"))
+		# submerged = this column is ocean AND our body is below the surface. Standing
+		# on a hill (is_water false) or above the waterline resumes walking seamlessly.
+		if terr.is_water(global_position.x, global_position.z) and global_position.y < wl:
+			_swim(wl, delta, chatting)
+			return
+
+	# ── normal walk (unchanged) ──
 	if not is_on_floor():
 		velocity.y -= gravity * delta
 
-	if Input.is_action_just_pressed("ui_accept") and is_on_floor():
+	if Input.is_action_just_pressed("ui_accept") and is_on_floor() and not chatting:
 		velocity.y = jump_velocity
 
 	var input_dir := Vector2.ZERO
-	if Input.is_key_pressed(KEY_W): input_dir.y -= 1
-	if Input.is_key_pressed(KEY_S): input_dir.y += 1
-	if Input.is_key_pressed(KEY_A): input_dir.x -= 1
-	if Input.is_key_pressed(KEY_D): input_dir.x += 1
+	if not chatting:
+		if Input.is_key_pressed(KEY_W): input_dir.y -= 1
+		if Input.is_key_pressed(KEY_S): input_dir.y += 1
+		if Input.is_key_pressed(KEY_A): input_dir.x -= 1
+		if Input.is_key_pressed(KEY_D): input_dir.x += 1
 	input_dir = input_dir.normalized()
 
 	var spd: float = speed * (0.6 if _starving else 1.0)   # sluggish when starving
@@ -156,6 +224,124 @@ func _physics_process(delta: float) -> void:
 		velocity.z = move_toward(velocity.z, 0, spd)
 
 	move_and_slide()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SWIMMING & BOATING  (only reached when island_mode is on and terrain exists)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Buoyancy floats you up toward the surface and you bob there; WASD paddles you
+# along at a reduced speed; Space swims up, Ctrl dives. You never sink to the
+# seafloor and never get launched — vertical speed is drag-damped and clamped.
+func _swim(wl: float, delta: float, chatting: bool) -> void:
+	var depth: float = wl - global_position.y   # >0 while below the surface
+	velocity.y += clampf(depth, 0.0, 2.5) * BUOYANCY * delta
+	if not chatting:
+		if Input.is_key_pressed(KEY_SPACE): velocity.y += SWIM_VERT * delta
+		if Input.is_key_pressed(KEY_CTRL):  velocity.y -= SWIM_VERT * delta
+	if depth < 0.0:                            # head breached — gently pulled back to bob
+		velocity.y -= gravity * delta
+	velocity.y = move_toward(velocity.y, 0.0, WATER_VDRAG * delta)
+	velocity.y = clampf(velocity.y, -SWIM_VERT, SWIM_VERT)
+
+	var input_dir := Vector2.ZERO
+	if not chatting:
+		if Input.is_key_pressed(KEY_W): input_dir.y -= 1
+		if Input.is_key_pressed(KEY_S): input_dir.y += 1
+		if Input.is_key_pressed(KEY_A): input_dir.x -= 1
+		if Input.is_key_pressed(KEY_D): input_dir.x += 1
+	input_dir = input_dir.normalized()
+	var direction := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
+	if direction:
+		velocity.x = direction.x * SWIM_SPEED
+		velocity.z = direction.z * SWIM_SPEED
+	else:
+		velocity.x = move_toward(velocity.x, 0.0, SWIM_SPEED)
+		velocity.z = move_toward(velocity.z, 0.0, SWIM_SPEED)
+	move_and_slide()
+
+# [R] launches a boat on the water ahead of you (costs PLAYER_BOAT_WOOD) and
+# boards you onto it. Press [R] again to disembark onto the nearest land.
+func _build_boat(terr) -> void:
+	if manager == null:
+		return
+	var have: int = int(manager.wood)
+	if have < PLAYER_BOAT_WOOD:
+		_boat_flash("Need %d wood for a boat — chop more trees." % PLAYER_BOAT_WOOD)
+		return
+	var wl: float = float(terr.get("water_level"))
+	var fwd := -global_transform.basis.z
+	fwd.y = 0.0
+	if fwd.length() < 0.01:
+		fwd = Vector3(0, 0, -1)
+	fwd = fwd.normalized()
+	var spot := global_position + fwd * 3.5
+	var ahead_water: bool = terr.is_water(spot.x, spot.z)
+	if not ahead_water:
+		# fall back to launching from right under you if you're already in the water
+		var here_water: bool = terr.is_water(global_position.x, global_position.z)
+		if here_water:
+			spot = global_position
+		else:
+			_boat_flash("No open water ahead to launch a boat.")
+			return
+	manager.wood = have - PLAYER_BOAT_WOOD
+	_boat = MeshInstance3D.new()
+	_boat.name = "PlayerBoat"
+	var bm := BoxMesh.new()
+	bm.size = Vector3(2.4, 0.5, 3.6)   # a small brown raft with a bit of size
+	_boat.mesh = bm
+	_boat.material_override = MatCache.flat(Color(0.42, 0.28, 0.14))
+	_boat.add_to_group("player_boat")
+	get_tree().current_scene.add_child(_boat)
+	_boat.global_position = Vector3(spot.x, wl, spot.z)
+	_on_boat = true
+	velocity = Vector3.ZERO
+	global_position = _boat.global_position + Vector3(0, 1.2, 0)   # ride on top
+	_boat_flash("You launch a boat! WASD to sail, [R] to step ashore.")
+
+# WASD drives the boat across the water; it floats at the waterline and refuses
+# to sail onto dry land (stops at the shoreline) so it can't strand on the beach.
+func _drive_boat(terr, delta: float, chatting: bool) -> void:
+	var wl: float = float(terr.get("water_level"))
+	var input_dir := Vector2.ZERO
+	if not chatting:
+		if Input.is_key_pressed(KEY_W): input_dir.y -= 1
+		if Input.is_key_pressed(KEY_S): input_dir.y += 1
+		if Input.is_key_pressed(KEY_A): input_dir.x -= 1
+		if Input.is_key_pressed(KEY_D): input_dir.x += 1
+	input_dir = input_dir.normalized()
+	var direction := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
+	var next_pos: Vector3 = _boat.global_position
+	if direction:
+		next_pos += direction * BOAT_SPEED * delta
+	var next_water: bool = terr.is_water(next_pos.x, next_pos.z)
+	if next_water:
+		_boat.global_position = Vector3(next_pos.x, wl, next_pos.z)
+	else:
+		_boat.global_position.y = wl   # blocked by shore — hold position
+	velocity = Vector3.ZERO
+	global_position = _boat.global_position + Vector3(0, 1.2, 0)
+
+# Step off onto the nearest dry land and free the boat cleanly (no leak).
+func _exit_boat(terr) -> void:
+	var from: Vector3 = _boat.global_position if is_instance_valid(_boat) else global_position
+	var land := Vector3.INF
+	if terr != null and is_instance_valid(terr) and terr.has_method("nearest_land"):
+		land = terr.nearest_land(from.x, from.z, 250.0)
+	if land != Vector3.INF:
+		global_position = Vector3(land.x, land.y + 1.5, land.z)
+	else:
+		global_position = from + Vector3(0, 1.0, 0)   # fallback: just hop off in place
+	velocity = Vector3.ZERO
+	_on_boat = false
+	if is_instance_valid(_boat):
+		_boat.queue_free()
+	_boat = null
+	_boat_flash("You step ashore.")
+
+func _boat_flash(t: String) -> void:
+	if manager != null and manager.has_method("notify"):
+		manager.notify(t)
 
 # ── hunger + survival inputs ──
 func take_hit(dmg: float, _attacker) -> void:
@@ -207,14 +393,21 @@ func _survival(delta: float) -> void:
 		_carve_club()
 	if _key_just(KEY_G):
 		_bribe()
-	if _key_just(KEY_T):
-		_scout()
+	if _key_just(KEY_X):
+		_scout()   # moved off T -- T is the chat key (TribeChat), they collided
 	if _key_just(KEY_Y):
 		_build_fence()
 	if _key_just(KEY_L):
 		_build_teepee()
 	if _key_just(KEY_Z):
 		_build_block()
+	# TERRAFORM: hold [,] to lower the land ahead, [.] to raise it. Held, not
+	# tapped, so you sculpt by dragging your aim -- the terrain throttles its own
+	# rebuilds so this stays smooth. Works on the spot you're looking at.
+	if Input.is_key_pressed(KEY_PERIOD):
+		_terraform(1.0, delta)
+	elif Input.is_key_pressed(KEY_COMMA):
+		_terraform(-1.0, delta)
 	if _key_just(KEY_H):
 		_feed_dog()
 	if _key_just(KEY_J) and manager and manager.has_method("toggle_dog_rally"):
@@ -273,6 +466,11 @@ func _survival(delta: float) -> void:
 	# [P] cycle how the whole workforce divides its labour
 	if _key_just(KEY_P) and manager and manager.has_method("cycle_work_plan"):
 		manager.cycle_work_plan()
+	# ['] send a trade ENVOY from your tribe to the nearest willing rival — offers
+	# your looted goods for their food. A courier physically walks it there and
+	# back; the outcome flashes. See Tribemanager.player_send_trade_envoy().
+	if _key_just(KEY_APOSTROPHE) and manager and manager.has_method("player_send_trade_envoy"):
+		manager.player_send_trade_envoy()
 	# [N] raise a forward camp where you stand (costs wood)
 	if _key_just(KEY_N) and manager and manager.has_method("try_build_camp"):
 		var f := -global_transform.basis.z
@@ -280,11 +478,26 @@ func _survival(delta: float) -> void:
 		if f.length() < 0.01:
 			f = Vector3(0, 0, -1)
 		manager.try_build_camp(global_position + f.normalized() * 5.0, true)
+	# [9] raise a trading post where you stand (costs wood + materials) --
+	# required before any trade action works, see Tribemanager.build_trading_post()
+	if _key_just(KEY_9) and manager and manager.has_method("build_trading_post"):
+		var f9 := -global_transform.basis.z
+		f9.y = 0.0
+		if f9.length() < 0.01:
+			f9 = Vector3(0, 0, -1)
+		manager.build_trading_post(global_position + f9.normalized() * 5.0, true)
 
 	if _club_model and manager and not _throw_anim_active:
 		_club_model.visible = manager.get("player_holds_club") == true
 
 func _key_just(code: int) -> bool:
+	# CHAT GATE at the source: every survival hotkey (F berries, C carve, G bribe,
+	# Y fence, L teepee, Z block, H feed dog...) routes through here, and [T] is
+	# the chat key itself -- so typing would fire all of them. Swallow them while
+	# the chat box is open, but still track key state so nothing latches.
+	if TribeChat.open or TribeTradeUI.open or TribeTradeMenu.open or TribeOverview.open or TribeInventoryUI.open:
+		_keys_down[code] = Input.is_key_pressed(code)
+		return false
 	var down := Input.is_key_pressed(code)
 	var was: bool = _keys_down.get(code, false)
 	_keys_down[code] = down
@@ -336,6 +549,14 @@ func _swing_club() -> void:
 	if foe and not foe.get("neutral") and foe.has_method("take_hit"):
 		foe.take_hit((18.0 if has_club else 9.0) * dmg_mult, self)
 		manager.notify("You strike a tribesperson!")
+		return
+	# 1b) strike one of YOUR OWN tribe members — betrayal. Previously the
+	# swing could only ever reach the rival "npc" group; own members (group
+	# "tribe") were never a valid melee target at all.
+	var own := _nearest_in_group("tribe", CLUB_REACH)
+	if own and own.has_method("take_hit"):
+		own.take_hit((18.0 if has_club else 9.0) * dmg_mult, self)
+		manager.notify("You strike %s! They will not forget this." % str(own.get("member_name")))
 		return
 	# 2) smash an enemy camp's totem — the blow is routed to their actual
 	# infrastructure (teepees first, then the stockpile); knock both down to
@@ -455,6 +676,21 @@ func _build_fence() -> void:
 	var pos := global_position + fwd * 2.2
 	pos.y = 0.0
 	manager.try_build_fence(pos, atan2(fwd.x, fwd.z), true)
+
+func _terraform(dir: float, delta: float) -> void:
+	if manager == null:
+		return
+	var t = manager.get("terrain")
+	if t == null or not is_instance_valid(t) or not t.has_method("raise_area"):
+		return
+	# aim a few metres ahead on the XZ plane, same as block-building targets
+	var fwd := -global_transform.basis.z
+	fwd.y = 0.0
+	if fwd.length() < 0.01:
+		fwd = Vector3(0, 0, -1)
+	fwd = fwd.normalized()
+	var target := global_position + fwd * 4.0
+	t.raise_area(target.x, target.z, 6.0, dir * 9.0 * delta)   # metres/sec at centre
 
 func _build_block() -> void:
 	if manager == null or not manager.has_method("try_build_block"):

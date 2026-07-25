@@ -28,6 +28,13 @@ class Neuron:
 	var refr_left: int = 0      # ticks remaining in refractory
 	var fired: bool = false     # did it fire this step?
 	var fire_count: int = 0
+	# VELOCITY-SENSITIVE FIRING (2026-07-19): how far potential overshot
+	# threshold the moment it fired, 0..1 normalized by threshold -- a
+	# neuron that just barely crossed vs. one driven well past it are
+	# different EVENTS, not the same binary "fired" flag. Read via
+	# fire_strength() right after step(); consumers (e.g. tribe_drums.gd)
+	# use it for velocity-sensitive output instead of a flat hit every time.
+	var last_fire_strength: float = 0.0
 
 class Synapse:
 	var src: int                # source neuron index
@@ -128,6 +135,9 @@ func step() -> Array:
 
 		# threshold check
 		if n.p >= n.threshold:
+			# capture overshoot BEFORE resetting p -- this is the actual
+			# "how hard did it fire" signal, gone the instant p is zeroed
+			n.last_fire_strength = clampf((n.p - n.threshold) / maxf(1.0, n.threshold), 0.0, 1.0)
 			n.p = 0.0
 			n.refr_left = refractory_ticks
 			n.fired = true
@@ -170,6 +180,13 @@ func get_potential(neuron_name: String) -> float:
 func did_fire(neuron_name: String) -> bool:
 	var i := _idx(neuron_name)
 	return neurons[i].fired if i >= 0 else false
+
+## How hard this neuron fired ITS OWN last time (0..1, overshoot past
+## threshold normalized by threshold) -- valid to read right after step()
+## for any neuron that fired this step; stale (but harmless) otherwise.
+func fire_strength(neuron_name: String) -> float:
+	var i := _idx(neuron_name)
+	return neurons[i].last_fire_strength if i >= 0 else 0.0
 
 func neuron_count() -> int:
 	return neurons.size()

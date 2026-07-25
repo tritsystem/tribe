@@ -82,6 +82,7 @@ func harvest(n: float) -> float:
 	add_child(n)
 	n.add_to_group("food_source")
 	n.global_position = pos
+	SpatialGrid.update(n)
 	return n
 
 func _check(label: String, ok: bool) -> void:

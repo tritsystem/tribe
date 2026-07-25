@@ -21,9 +21,7 @@ func _ready() -> void:
 	var m := BoxMesh.new()
 	m.size = Vector3(0.08, 0.08, 0.7)
 	mesh.mesh = m
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.45, 0.30, 0.15)
-	mesh.material_override = mat
+	mesh.material_override = MatCache.flat(Color(0.45, 0.30, 0.15))
 	add_child(mesh)
 
 	var col := CollisionShape3D.new()
@@ -61,6 +59,14 @@ func _on_body_entered(body: Node) -> void:
 			thrower.screen_shake(0.035)
 		if mgr and mgr.has_method("notify"):
 			mgr.notify("Your thrown club strikes true!")
+		queue_free()
+	elif body.is_in_group("tribe") and body.has_method("take_hit"):
+		# own member -- take_hit() itself detects the player attacker and calls betray()
+		body.take_hit(damage, thrower)
+		if thrower and thrower.has_method("screen_shake"):
+			thrower.screen_shake(0.035)
+		if mgr and mgr.has_method("notify"):
+			mgr.notify("Your thrown club strikes %s! They will not forget this." % str(body.get("member_name")))
 		queue_free()
 	elif body.is_in_group("animal") and body.has_method("killed"):
 		var loot: Dictionary = body.killed()

@@ -57,9 +57,7 @@ func _build() -> void:
 	bm.size = Vector3(3.2, 0.3, 3.2)
 	base.mesh = bm
 	base.position = Vector3(0, 0.15, 0)
-	var bmat := StandardMaterial3D.new()
-	bmat.albedo_color = Color(0.40, 0.28, 0.16)
-	base.material_override = bmat
+	base.material_override = MatCache.flat(Color(0.40, 0.28, 0.16))
 	add_child(base)
 
 	# the sack/food pile (scales with supplies)
@@ -68,9 +66,7 @@ func _build() -> void:
 	pm.size = Vector3(2.2, 1.0, 2.2)
 	_pile.mesh = pm
 	_pile.position = Vector3(0, 0.8, 0)
-	var pmat := StandardMaterial3D.new()
-	pmat.albedo_color = Color(0.85, 0.7, 0.35)
-	_pile.material_override = pmat
+	_pile.material_override = MatCache.flat(Color(0.85, 0.7, 0.35))
 	add_child(_pile)
 
 	# a small rack of clubs off to the side
@@ -79,9 +75,7 @@ func _build() -> void:
 	cm.size = Vector3(0.3, 0.3, 1.4)
 	_clubs_rack.mesh = cm
 	_clubs_rack.position = Vector3(2.0, 0.6, 0)
-	var cmat := StandardMaterial3D.new()
-	cmat.albedo_color = Color(0.45, 0.30, 0.15)
-	_clubs_rack.material_override = cmat
+	_clubs_rack.material_override = MatCache.flat(Color(0.45, 0.30, 0.15))
 	add_child(_clubs_rack)
 
 	_label = Label3D.new()

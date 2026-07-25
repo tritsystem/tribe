@@ -5,10 +5,13 @@ extends Node
 
 enum Quality { LOW, MEDIUM, HIGH }
 
-# Default MEDIUM, not HIGH: HIGH (MSAA 4x + SSAO + 4-split shadows) tanked
-# framerate. MEDIUM keeps shadows/glow/fog/tonemap (the look) but drops the
-# three biggest GPU costs. Bump to HIGH from the settings menu if the GPU allows.
-var current: int = Quality.MEDIUM
+# Default LOW. MEDIUM still kept GLOW (full-screen bloom), SHADOWS (a whole
+# second render pass over every mesh from the sun's view), and MSAA 2x -- on the
+# huge island maps those three together made it "insanely laggy, unplayable"
+# regardless of mesh count (the real cost was never the meshes). LOW turns all of
+# them OFF for a playable framerate; bump to MEDIUM/HIGH from a settings menu once
+# the world is smooth. This is the single biggest FPS lever in the project.
+var current: int = Quality.LOW
 
 func _ready() -> void:
 	set_process(true)   # apply on first frame after main scene is loaded
@@ -35,8 +38,9 @@ func _process(_delta: float) -> void:
 			vp.msaa_3d = Viewport.MSAA_DISABLED
 			if we and we.environment:
 				we.environment.ssao_enabled = false
+				we.environment.glow_enabled = false   # full-screen bloom -- costly, gone
 			if sun:
-				sun.shadow_enabled = false
+				sun.shadow_enabled = false             # skips the whole shadow render pass
 		Quality.MEDIUM:
 			vp.msaa_3d = Viewport.MSAA_2X
 			if we and we.environment:
@@ -48,6 +52,15 @@ func _process(_delta: float) -> void:
 			vp.msaa_3d = Viewport.MSAA_4X
 			if we and we.environment:
 				we.environment.ssao_enabled = true
+				# GLOW (2026-07-19): HIGH never actually turned this ON --
+				# only LOW explicitly turned it off, so it silently rode
+				# whatever the scene's WorldEnvironment resource happened to
+				# have baked in. Real embers (campfire.gd/blacksmith_forge.gd
+				# both use emissive materials) only actually bloom with this
+				# genuinely enabled -- a real, visible payoff for choosing HIGH.
+				we.environment.glow_enabled = true
+				we.environment.glow_bloom = 0.12
+				we.environment.glow_intensity = 0.9
 			if sun:
 				sun.shadow_enabled = true
 				sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS

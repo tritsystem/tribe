@@ -3,7 +3,7 @@ extends Node
 # TribeChat — talk to your tribe in plain language; they answer FROM memory.
 # Autoload singleton: TribeChat
 #
-# Press [T] to talk to the nearest member. Type, Enter to send, Esc to close.
+# Press [Enter] to talk to the nearest member. Type, Enter to send, Esc to close.
 # Their reply is generated from what they ACTUALLY remember about you (feeds,
 # rank shifts, past conversations) plus their personality and standing -- and
 # the exchange is itself written back to memory, so what you say to Ka today is
@@ -40,6 +40,14 @@ var _history: Array[String] = []
 # memory, and needs its own always-included channel instead of routing
 # through the (correctly) filtered memory pool.
 var _last_own_reply: Dictionary = {}
+
+## ADDITIVE THOUGHTS (2026-07-19): "same question 3 times = you asked me
+## this 3 times?" -- a lifetime count of how many times the player has
+## literally asked THIS member the same (case/whitespace-normalized) line,
+## so repetition itself becomes something the member can react to, not
+## something that resets every conversation.
+var _question_counts: Dictionary = {}   # "npc_name:normalized text" -> int
+const REPEAT_QUESTION_CALLOUT_AT := 3
 
 func _ready() -> void:
 	TribeLLM.line_ready.connect(_on_line)
@@ -104,7 +112,11 @@ func _build_ui() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if not (event is InputEventKey and event.pressed):
 		return
-	if not open and event.keycode == KEY_T:
+	# SWITCHED (2026-07-19): T now opens the trading post menu (see
+	# Tribemanager.gd's TribeTradeMenu binding) -- they collided, chat always
+	# winning since it's checked first, so T never actually reached the
+	# trade menu. Enter is the more natural "start typing" key anyway.
+	if not open and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER):
 		_open_chat()
 		get_viewport().set_input_as_handled()
 	elif open and event.keycode == KEY_ESCAPE:
@@ -237,6 +249,12 @@ func _say_to(member: Node, text: String, delay: float) -> void:
 	# NOT `name` -- that shadows Node.name and would silently bite later
 	var npc_name: String = str(member.get("member_name"))
 
+	# ADDITIVE THOUGHTS: count this exact question (normalized) toward a
+	# lifetime total for this member -- see _question_counts's declaration.
+	var qkey: String = npc_name + ":" + text.strip_edges().to_lower()
+	_question_counts[qkey] = int(_question_counts.get(qkey, 0)) + 1
+	var repeat_count: int = _question_counts[qkey]
+
 	# THEY REMEMBER WHAT YOU SAID -- this is the whole point. It lands in their
 	# vault note and can surface in a later conversation with someone else.
 	TribeMemory.remember(npc_name, "heard", "You", "You said to me: \"%s\"" % text, "neutral", 0.03)
@@ -275,14 +293,19 @@ func _say_to(member: Node, text: String, delay: float) -> void:
 		return
 
 	var brain_text: String = str(member.call("brain_snapshot")) if member.has_method("brain_snapshot") else ""
-	var persona: String = "%s Your standing with the leader is '%s'. %s" % [
-		_flavour(str(member.get("personality"))), str(member.get("current_rank")), brain_text]
+	var blame_line: String = str(member.call("core_memory_blame_line")) if member.has_method("core_memory_blame_line") else ""
+	var persona: String = "%s Your standing with the leader is '%s'. %s%s" % [
+		_flavour(str(member.get("personality"))), str(member.get("current_rank")), brain_text, blame_line]
 	# Answering the LEADER directly gets an extra guard the model needs (see the
 	# tribe_llm hallucination notes): don't claim a memory you weren't given, and
 	# answer trust questions from actual standing.
 	var guard := " Do not claim to remember a past conversation unless it is in " \
 		+ "your memories above. Answer from your CURRENT feelings; your standing " \
 		+ "is '%s', so let it decide how much you trust the Leader." % str(member.get("current_rank"))
+	if repeat_count >= REPEAT_QUESTION_CALLOUT_AT:
+		guard += " The Leader has now asked you this EXACT thing %d times. React to " \
+			% repeat_count + "the repetition itself (mild annoyance, confusion, or a pointed " \
+			+ "\"you've asked me this %d times\" -- your call) instead of just answering fresh." % repeat_count
 	# short-term conversational continuity, separate from long-term memory --
 	# see _last_own_reply's declaration for why this can't route through
 	# context_for() (its echo guard deliberately excludes this exact thing).

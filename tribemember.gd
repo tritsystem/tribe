@@ -20,6 +20,7 @@ extends CharacterBody3D
 # ─────────────────────────────────────────────────────────────────────────────
 
 const SpatialGrid = preload("res://spatial_grid.gd")
+const HysteresisGateScript = preload("res://hysteresis_gate.gd")
 
 @export var member_name: String = "Tribesman"
 @export var personality: String = "Steady"
@@ -71,6 +72,30 @@ const RANKS := [
 	["Devoted",      2.20],   # must equal TRUST_BAR_SCALE
 ]
 
+# RANK HYSTERESIS (2026-07-19): "does it save tokens" -> "what's the best use
+# case" -- the same real dual-threshold gate proven on tribe_llm.gd's queue
+# backlog, applied here to a much more consequential wobble: `relationship`
+# drifts constantly (BOND_DECAY_RATE pulls it down every second, WORK_REL_GAIN
+# etc. push it up) and a member sitting right at a rank's cutoff used to be
+# able to cross back and forth on tiny fluctuations -- each crossing fires a
+# REAL memory ("my feeling toward you deepened/cooled"), a social_role
+# recompute, and (on the loyalty math) changes whether they'll accept a risky
+# order. One gate per rank boundary; a rank is only lost once relationship
+# falls to RANK_HYSTERESIS_MARGIN of its entry point, not the instant it dips
+# below the entry point itself.
+const RANK_HYSTERESIS_MARGIN := 0.85
+var _rank_gates: Dictionary = {}   # rank name -> HysteresisGate (all ranks except "Stranger")
+
+func _ensure_rank_gates() -> void:
+	if not _rank_gates.is_empty():
+		return
+	for r in RANKS:
+		var name: String = String(r[0])
+		if name == "Stranger":
+			continue
+		var cutoff: float = float(r[1])
+		_rank_gates[name] = HysteresisGateScript.new(cutoff * RANK_HYSTERESIS_MARGIN, cutoff)
+
 # ── loyalty score each rank contributes toward accepting a risky order ──
 const RANK_LOYALTY := {
 	"Stranger": 15, "Acquaintance": 45, "Friend": 75, "Loyal": 100, "Devoted": 125,
@@ -104,8 +129,20 @@ const ORDER_BASE := 70                                                        # 
 # guard=140: stationed defense duty draws real raider attention (that's the
 # point of a guard post), priced a notch above hunt but well under scout's
 # solo-in-hostile-territory risk.
-const ORDER_RISK := {"come": 80, "gather": 100, "hunt": 130, "scout": 165, "wood": 100,
-	"recruit": 110, "guard": 140}
+# RETUNED (2026-07-19): "my tribe is stagnant" + "keeps doing the hunt i
+# dont trust you enough repetitive loop" -- at gather/wood=100, drive=
+# ORDER_BASE(70)+loyalty+courage meant a Stranger(loyalty 15) needed +15
+# courage just to clear BASIC FORAGING, so Steady(0)/Wary(-15)/Greedy(-5)
+# personalities -- the majority of the roster -- could do NOTHING at all
+# autonomously until Acquaintance, no matter how mundane the task. That's
+# not a loyalty system working as intended, it's most of the tribe locked
+# out of basic survival work and repeatedly refusing/idling instead.
+# Foraging/woodcutting are genuinely low-risk (in sight of camp, no
+# confrontation) -- lowered so an average-courage Stranger can actually
+# pull their weight from day one, while hunt/scout/guard (real physical
+# danger) are UNCHANGED and still have to be earned.
+const ORDER_RISK := {"come": 80, "gather": 70, "hunt": 130, "scout": 165, "wood": 70,
+	"recruit": 110, "guard": 140, "mine": 90}
 
 # ── brain LOD: skip Spikeling ticks for members beyond this distance ──
 const BRAIN_LOD_RADIUS := 80.0
@@ -272,7 +309,19 @@ var _chase_timer: float = 0.0       # patience left to actually catch _foe befor
 # are distance-only, same honest proxy every other proximity check in this
 # file already uses (_nearby_rival_count, _nearest_base_threat) -- no line of
 # sight/occlusion anywhere in this codebase, so this doesn't invent one.
-const SIGHT_RADIUS := 12.0
+## RAISED (2026-07-19): "npcs need larger field of view, they suck at
+## searching" -- at 12.0 a member frequently had NOTHING in sight even
+## standing right next to a moderately sparse bush/tree/animal, forcing
+## _begin_fallback()'s blind outward search to do almost all the real work.
+## Raised to a range that covers a much bigger work radius around camp before
+## falling back to search at all. Kept BELOW HEARING_RADIUS (24.0) on purpose
+## -- "hear danger before you can see it" is a real, load-bearing design
+## invariant elsewhere (hears_danger/_sense_environment()); sight overtaking
+## hearing would make that mechanic unreachable through ordinary proximity.
+## Safe to raise this much now that the _nearest_*() lookups below query
+## SpatialGrid instead of scanning every node in the group -- cost no longer
+## scales with how far this reaches.
+const SIGHT_RADIUS := 20.0
 const HEARING_RADIUS := 24.0
 const SENSE_INTERVAL := 1.5      # seconds; environment doesn't need 10Hz precision
 var _sense_cd: float = 0.0
@@ -312,8 +361,25 @@ const SEARCH_RADIUS_MAX    := 90.0   # cap — still findable/walkable, not an e
 # a member who has searched this many times running (i.e. is genuinely far
 # out, not just unlucky once) is a real candidate to found a new outpost
 # stockpile instead of just wandering — see Tribemanager.found_outpost().
-const EXPANSION_SEARCH_STREAK := 4
+# EASED (2026-07-19): "build and expand more efficiently, progress is too
+# slow" -- was 4 consecutive failed searches before a member would consider
+# founding a new settlement; a real, felt reduction in how long expansion
+# takes to actually start happening.
+const EXPANSION_SEARCH_STREAK := 3
 var _search_streak: int = 0
+# BUG FIXED (2026-07-19): "npc can't find far away nodes, they run in circles"
+# -- _begin_fallback() re-rolled a brand new RANDOM angle on every single
+# failed search, from wherever the last random leg happened to leave them.
+# The radius genuinely grew with the streak, but with no persistent
+# direction each leg was as likely to double back toward camp as away from
+# it, so net displacement across a whole streak was closer to a random walk
+# than an actual outward search -- a real far-off bush/tree/animal could sit
+# just past SEARCH_RADIUS_MAX and never once get reached. Now a streak locks
+# in ONE heading (and one origin) on its first failure and keeps walking
+# further along THAT SAME line each subsequent failure, only giving up the
+# heading once something is actually found (streak resets to 0 elsewhere).
+var _search_dir: Vector3 = Vector3.ZERO
+var _search_origin: Vector3 = Vector3.ZERO
 
 # ── NPC-to-NPC food sharing (2026-07-18) ──────────────────────────────────
 # Previously the only food transfers in this whole game were player->member
@@ -390,6 +456,62 @@ func set_standing(job: String, target: int) -> void:
 	TribeMemory.remember(member_name, "ordered", "You",
 		"You told me to %s%s." % [job, (" (%d)" % target) if target > 0 else ""],
 		"neutral", 0.0)
+	_relay_to_subordinates(job, target)
+
+# ── CHAIN OF COMMAND (2026-07-19) ───────────────────────────────────────────
+# Previously every order (player-issued or self-directed) reached whichever
+# single member it targeted with no notion of rank at all -- an Outpostman
+# and the newest Stranger were equally "told" by the player, and nobody ever
+# relayed anything to anyone else. Real trickle-down: only an Official (the
+# top of the tribe's own hierarchy, see Tribemanager.is_official()) passes an
+# order it just received on to nearby SUBORDINATES (non-Officials). Each
+# subordinate still weighs it through their own give_order() loyalty check --
+# this is delegation, not a bypass; a distrustful subordinate can still
+# refuse their Official same as they could the player.
+const RELAY_RADIUS := 40.0
+
+## PEER CONTRIBUTION AWARENESS (2026-07-19): previously a member only ever
+## reasoned about their OWN contrib_score() (gear upgrades, role tally) --
+## they had no notion of how anyone ELSE was pulling their weight. Each idle
+## tick, sample one real nearby tribemate and let a genuine gap in
+## contribution actually move npc_opinion, the same real channel gossip
+## already uses (see tribe_rumor.gd's GOSSIP_HIT/GOSSIP_BOOST) -- so a
+## freeloader is gradually resented and a standout is gradually respected,
+## from firsthand observation rather than hearsay.
+const PEER_EVAL_RADIUS := 30.0
+const PEER_EVAL_GAP := 15          # contrib_score() gap before it registers at all
+const PEER_EVAL_SHIFT := 0.04
+
+func _evaluate_peer_contribution() -> void:
+	if manager == null:
+		return
+	var mine: int = productivity()
+	for m in manager.members:
+		if not is_instance_valid(m) or m == self or not ("member_name" in m):
+			continue
+		if global_position.distance_to(m.global_position) > PEER_EVAL_RADIUS:
+			continue
+		var theirs: int = m.productivity() if m.has_method("productivity") else 0
+		var gap: int = theirs - mine
+		if absi(gap) < PEER_EVAL_GAP:
+			continue
+		var peer_name: String = str(m.member_name)
+		var delta: float = PEER_EVAL_SHIFT if gap > 0 else -PEER_EVAL_SHIFT
+		npc_opinion[peer_name] = clampf(float(npc_opinion.get(peer_name, 0.0)) + delta, -1.0, 1.0)
+		return   # one real observation per tick — not an instant tribe-wide audit
+
+func _relay_to_subordinates(job: String, target: int) -> void:
+	if social_role != "Official" or manager == null or job == "":
+		return
+	for m in manager.members:
+		if not is_instance_valid(m) or m == self:
+			continue
+		if str(m.get("social_role")) == "Official":
+			continue   # peers, not subordinates -- the player/leader orders Officials directly
+		if global_position.distance_to(m.global_position) > RELAY_RADIUS:
+			continue
+		if m.has_method("give_order") and m.give_order(job) and m.has_method("set_standing"):
+			m.set_standing(job, target)   # safe: subordinates return immediately above, no relay chain
 
 func clear_standing() -> void:
 	TribeMemory.remember(member_name, "ordered", "You",
@@ -434,6 +556,130 @@ const ARMOR_TIERS := [
 var weapon: int = 0
 var armor: int = 0
 
+# ── PROFESSIONS (2026-07-19): "30 professions, tie it all together" -- one
+# shared skill-progression mechanic every profession uses (practice ->
+# skill -> WoW-style tiered recipe unlocks -> can teach a lower-skilled
+# peer), rather than 30 hand-built unique systems. Blacksmithing is the one
+# with real recipe-gating wired in below (craft_weapon/craft_armor); the
+# rest are real, assignable, practice-trackable roles a member can commit
+# to and grow in, ready for the same treatment as they get their own
+# recipes/actions.
+const PROFESSIONS := [
+	"Blacksmithing", "Leatherworking", "Woodworking", "Glassblowing", "Masonry",
+	"Tanning", "Weaving", "Pottery", "Bowyer", "Fletching",
+	"Herbalism", "Alchemy", "Cooking", "Brewing", "Fishing",
+	"Trapping", "Mining", "Gemcutting", "Jewelcrafting", "Tailoring",
+	"Carpentry", "Shipwrighting", "Farming", "Beekeeping", "Dyeing",
+	"Papermaking", "Scribing", "Engineering", "Tinkering", "Animal Husbandry",
+]
+const SKILL_TIER_NAMES := ["Untrained", "Novice", "Journeyman", "Expert", "Master"]
+const SKILL_TIER_STEP := 25.0     # skill points per tier -- 4 real tiers above Untrained
+const PRACTICE_GAIN := 3.0        # skill earned per successful craft/use
+const TEACH_TRUST_BAR := 0.30     # matches Acquaintance -- must have warmed up at all first
+
+var profession: String = ""              # "" = none chosen yet
+var profession_skill: Dictionary = {}    # profession name -> float 0..100
+
+## INVENTORY (2026-07-19): "add npc and player inventory" -- distinct from
+## inv_food (personal rations) and weapon/armor tiers (equipped gear, one
+## slot each): a general-purpose item count, mainly populated by
+## _practice_and_produce() below -- what a profession actually YIELDS, kept
+## on the member who made it (a personal keepsake/stock), not dumped into
+## the shared stockpile the way raw gather/mine/chop output is.
+var inventory: Dictionary = {}   # item name -> int count
+
+func add_item(item: String, n: int = 1) -> void:
+	inventory[item] = int(inventory.get(item, 0)) + n
+
+func item_count(item: String) -> int:
+	return int(inventory.get(item, 0))
+
+## PROFESSIONS PRODUCE REAL GOODS (2026-07-19): "professions have to use
+## real materials from in game" + "across all 30 professions" -- one shared
+## conversion every profession uses (spend real shared materials -> gain a
+## named good in personal inventory + real practice), rather than 30
+## bespoke recipes. Blacksmithing keeps its own bespoke weapon/armor tiers
+## (craft_weapon/craft_armor) on top of this; every OTHER profession gets
+## this as its real, working action.
+const PROFESSION_OUTPUT := {
+	"Blacksmithing": "Ingot", "Leatherworking": "Leather Roll", "Woodworking": "Carved Idol",
+	"Glassblowing": "Glass Vial", "Masonry": "Cut Stone", "Tanning": "Tanned Hide",
+	"Weaving": "Woven Cloth", "Pottery": "Clay Pot", "Bowyer": "Bow Stave",
+	"Fletching": "Arrow Bundle", "Herbalism": "Herb Bundle", "Alchemy": "Tonic",
+	"Cooking": "Cooked Meal", "Brewing": "Brewed Cask", "Fishing": "Smoked Fish",
+	"Trapping": "Cured Pelt", "Mining": "Ore Sack", "Gemcutting": "Cut Gem",
+	"Jewelcrafting": "Fine Jewelry", "Tailoring": "Stitched Garment", "Carpentry": "Timber Frame",
+	"Shipwrighting": "Hull Plank", "Farming": "Grain Sack", "Beekeeping": "Honeycomb",
+	"Dyeing": "Dyed Cloth", "Papermaking": "Paper Sheet", "Scribing": "Written Scroll",
+	"Engineering": "Rigged Contraption", "Tinkering": "Tinkered Gadget", "Animal Husbandry": "Bred Stock",
+}
+const PROFESSION_PRODUCE_COST := 3   # shared materials spent per unit produced
+
+func _practice_and_produce(prof: String) -> bool:
+	if skill_in(prof) <= 0.0 or manager == null or not manager.has_method("spend_materials_at"):
+		return false
+	if not manager.spend_materials_at(home_pos, PROFESSION_PRODUCE_COST):
+		return false
+	var output: String = str(PROFESSION_OUTPUT.get(prof, "Goods"))
+	add_item(output)
+	practice_profession(prof)
+	_think("Made: %s." % output, 2.0)
+	TribeMemory.remember(member_name, "crafted", "You",
+		"I put my %s to work and made a %s." % [prof, output], "proud", 0.02)
+	return true
+
+## Set once, by Tribemanager._make_loyal_companion(), on the very first
+## companion every tribe starts with -- see _maybe_feed_a_stranger() below
+## for the baseline behavior this actually turns on.
+var is_founding_recruiter: bool = false
+const FOUNDING_RECRUITER_FEED_CHANCE := 0.30
+
+func skill_in(prof: String) -> float:
+	return float(profession_skill.get(prof, 0.0))
+
+func skill_tier(prof: String) -> String:
+	var idx: int = clampi(int(skill_in(prof) / SKILL_TIER_STEP), 0, SKILL_TIER_NAMES.size() - 1)
+	return SKILL_TIER_NAMES[idx]
+
+## Practicing a profession is how every recipe past the basics gets learned --
+## no slider, no instant mastery. Also nudges `profession` itself toward
+## whatever's actually being practiced, the same way social_role emerges from
+## job tally rather than being hand-assigned.
+func practice_profession(prof: String, amount: float = PRACTICE_GAIN) -> void:
+	if not (prof in PROFESSIONS):
+		return
+	var before: float = skill_in(prof)
+	var after: float = clampf(before + amount, 0.0, 100.0)
+	profession_skill[prof] = after
+	if profession == "":
+		profession = prof
+	if int(after / SKILL_TIER_STEP) > int(before / SKILL_TIER_STEP):
+		_think("My %s has grown to %s." % [prof, skill_tier(prof)], 2.4)
+		TribeMemory.remember(member_name, "trauma", "You",
+			"Practice paid off -- my %s reached %s." % [prof, skill_tier(prof)], "proud", 0.03)
+
+## TEACH & GUIDE (2026-07-19): a genuinely more-skilled member can pass real
+## progress to a nearby, trusted, less-skilled one -- capped so a pupil can
+## never leapfrog past their teacher's own current skill in one lesson, and
+## gated on the same warmed-up-at-all bar _auto_work() already uses (a total
+## Stranger can't be taught, same principle as every other trust gate added
+## this session).
+func teach_profession(pupil, prof: String) -> bool:
+	if pupil == null or not is_instance_valid(pupil) or not ("relationship" in pupil):
+		return false
+	if float(pupil.get("relationship")) < TEACH_TRUST_BAR:
+		return false
+	var mine: float = skill_in(prof)
+	var theirs: float = pupil.skill_in(prof) if pupil.has_method("skill_in") else 0.0
+	if mine <= theirs:
+		return false   # nothing real to teach -- the pupil already knows as much
+	var gain: float = minf(SKILL_TIER_STEP * 0.5, mine - theirs)
+	if pupil.has_method("practice_profession"):
+		pupil.practice_profession(prof, gain)
+	TribeMemory.remember(str(pupil.get("member_name")), "ordered", str(member_name),
+		"%s taught me a real lesson in %s." % [member_name, prof], "neutral", 0.02)
+	return true
+
 func weapon_mult() -> float:
 	return float(WEAPON_TIERS[clampi(weapon, 0, WEAPON_TIERS.size() - 1)]["mult"])
 
@@ -450,10 +696,19 @@ func set_gear(w: int, a: int) -> void:
 ## (crafting isn't dangerous, same precedent as "build"/"carve" -- see the
 ## comment on ORDER_RISK). Returns false (and does nothing) if materials are
 ## short, same fail-soft discipline as _maybe_upgrade_gear().
+## WoW-STYLE RECIPE GATING (2026-07-19): tier 0 (bare Club) needs no skill at
+## all; each tier above that needs Blacksmithing at the matching tier
+## (SKILL_TIER_STEP per tier -- Spear at Novice, Bow at Journeyman, Axe at
+## Expert). A member with no practice literally cannot forge the good stuff
+## yet, no matter how many materials are on hand -- skill has to be earned by
+## actually crafting (see practice_profession() below), same as a real trade.
 func craft_weapon(tier: int) -> bool:
 	if manager == null or not manager.has_method("spend_materials_at"):
 		return false
 	tier = clampi(tier, 0, WEAPON_TIERS.size() - 1)
+	if float(tier) * SKILL_TIER_STEP > skill_in("Blacksmithing"):
+		_think("I haven't learned to forge a %s yet -- needs more practice." % str(WEAPON_TIERS[tier]["name"]), 2.2)
+		return false
 	# DISTRICT BONUS (2026-08-03): a Crafting settlement's workshop genuinely
 	# cuts material cost for its own residents.
 	var cost: int = _GEAR_MAT_COST
@@ -466,15 +721,210 @@ func craft_weapon(tier: int) -> bool:
 		_think("Not enough materials to craft that yet.", 2.0)
 		return false
 	weapon = tier
+	practice_profession("Blacksmithing")
 	var wname: String = str(WEAPON_TIERS[tier]["name"])
 	_think("Crafted a %s." % wname, 2.0)
 	TribeMemory.remember(member_name, "crafted", "You",
 		"You had me craft a %s." % wname, "neutral", 0.02)
 	return true
 
+## Armor's the same recipe-gating shape as craft_weapon() above, same
+## Blacksmithing skill (a smith forges both, same trade).
+func craft_armor(tier: int) -> bool:
+	if manager == null or not manager.has_method("spend_materials_at"):
+		return false
+	tier = clampi(tier, 0, ARMOR_TIERS.size() - 1)
+	if float(tier) * SKILL_TIER_STEP > skill_in("Blacksmithing"):
+		_think("I haven't learned to forge %s armor yet -- needs more practice." % str(ARMOR_TIERS[tier]["name"]), 2.2)
+		return false
+	var cost: int = _GEAR_MAT_COST
+	if manager.has_method("crafting_discount_at"):
+		cost = maxi(1, int(round(float(_GEAR_MAT_COST) * manager.crafting_discount_at(home_pos))))
+	if not manager.spend_materials_at(home_pos, cost):
+		_think("Not enough materials to craft that yet.", 2.0)
+		return false
+	armor = tier
+	practice_profession("Blacksmithing")
+	var aname: String = str(ARMOR_TIERS[tier]["name"])
+	_think("Crafted %s armor." % aname, 2.0)
+	TribeMemory.remember(member_name, "crafted", "You",
+		"You had me craft %s armor." % aname, "neutral", 0.02)
+	return true
+
 # productivity — feeds the "who should lead" calculation
 var contrib_food: int = 0
 var contrib_wood: int = 0
+
+# ── personality change from lived experience (2026-07-19) ──────────────────
+# PERSONALITIES is a fixed archetype table (hand-tuned brain weights), so
+# "changing" means reassigning `personality` to a neighboring archetype, not
+# mutating the table. Two independent triggers, matching the two the player
+# actually asked for: repeated real hardship (take_hit, below) nudges toward
+# "Wary"; repeated real contribution (_complete_task, above) nudges toward
+# "Trusting". Both are rate-limited (a threshold that keeps climbing) so one
+# bad afternoon or one lucky haul can't flip someone's whole personality.
+const CONTRIB_SHIFT_INTERVAL := 60          # combined food+wood contribution per shift
+const TRAUMA_HITS_PER_SHIFT := 3            # real hits taken per shift
+var _next_contrib_shift_at: int = CONTRIB_SHIFT_INTERVAL
+var _trauma_hit_count: int = 0
+
+## this member's archetype courage score -- read by Tribemanager.dominant_ideology()
+## to classify the tribe's emergent temperament from its actual personality mix.
+func courage() -> int:
+	return int(PERSONALITIES.get(personality, PERSONALITIES["Steady"])["courage"])
+
+## A real tribe-wide reaction to a real loss (2026-07-19) -- called on every
+## survivor by Tribemanager.on_member_died(). Distinct from take_hit()'s own
+## trauma counter (that's for being personally attacked); this is grief at
+## losing one of your own, worse and more likely to change you if the
+## LEADER did it.
+const WITNESS_TRAUMA_CHANCE := 0.4
+
+## ADDITIVE THOUGHTS (2026-07-19): "allow npc thoughts to have additive
+## properties, witnessing 3 members die one by one = you let 3 members die"
+## -- separate cumulative counters for deaths genuinely caused by the
+## leader (denied stockpile access, or a direct killing) so repeated real
+## failures actually compound into an escalating line and a real
+## consequence, instead of each death being independently forgotten.
+var player_caused_deaths_witnessed: int = 0
+const LOST_FAITH_DEATH_THRESHOLD := 3
+
+## Core-memory SSH chain (npc_core_memory.gd) -- betrayals/deaths caused by
+## the player are written to EDGE slots (survive panic); routine slights go
+## to BULK slots (wash out under the same panic). See that file's header for
+## the confirmed experiment this is built on.
+const NPCCoreMemoryScript = preload("res://npc_core_memory.gd")
+var _core_memory: NPCCoreMemory = null
+func _ensure_core_memory() -> NPCCoreMemory:
+	if _core_memory == null:
+		_core_memory = NPCCoreMemoryScript.new()
+	return _core_memory
+
+## Called every tick a real threat is nearby (see _nearest_base_threat()) --
+## the actual panic that degrades bulk (routine) memories while edge (core)
+## memories stay reliable, same mechanism as the SSH chiral experiment's
+## hopping disorder.
+func _apply_memory_stress(intensity: float) -> void:
+	_ensure_core_memory().apply_stress(intensity)
+
+## How reliably this NPC still recalls a given core memory right now (0..1,
+## 0 = truly forgotten). Real gameplay hook: trust/dialogue decisions can
+## check this instead of an eternal, undegradeable flag.
+func recall_core_memory(tag: String) -> float:
+	return _ensure_core_memory().recall(tag)
+
+## Turns a stored core-memory tag into an actual sentence a player would
+## recognize, keyed off the exact tags written by witness_tribemate_death()
+## and blame_leader_for_hunger_death() above.
+func _describe_core_tag(tag: String) -> String:
+	var parts: PackedStringArray = tag.split(":", true, 1)
+	if parts.size() != 2:
+		return "something that happened between you"
+	var kind: String = parts[0]
+	var who: String = parts[1]
+	match kind:
+		"betrayal":
+			return "you killing %s with your own hands" % who
+		"hunger_neglect":
+			return "%s starving while you left them locked out of the stockpile" % who
+		_:
+			return "what happened to %s" % who
+
+## Wired into dialogue (tribe_chat.gd's persona string): the SSH edge-vs-bulk
+## result made real -- how strongly this NPC brings up a past betrayal right
+## NOW depends on live recall confidence, not a permanent flag. A calm NPC
+## recalls vividly; one who's just been through real combat panic (see
+## _apply_memory_stress()) may genuinely have it worn hazy, same as a routine
+## grudge would under the same stress.
+func core_memory_blame_line() -> String:
+	if _core_memory == null:
+		return ""
+	var tags: Array = _core_memory.core_tags()
+	if tags.is_empty():
+		return ""
+	var best_tag: String = ""
+	var best_conf: float = -1.0
+	for t in tags:
+		var c: float = recall_core_memory(str(t))
+		if c > best_conf:
+			best_conf = c
+			best_tag = str(t)
+	if best_conf <= 0.0:
+		return ""
+	var described: String = _describe_core_tag(best_tag)
+	if best_conf >= 0.08:
+		return " You vividly remember %s -- it colors how much you trust the Leader right now, and you should let it show." % described
+	return " Some part of you remembers something bad involving the Leader, but everything since has worn it hazy -- you're not sure it should still weigh on you."
+
+## "if npcs die to hunger have other npcs blame leader for negligence" --
+## distinct from witness_tribemate_death() below (an outside threat/raid):
+## this is specifically about the LEADER'S stockpile failing to feed the
+## tribe. `denied_access` distinguishes real negligence (a Stranger who
+## never earned access at all) from a supply failure (Acquaintance+, had
+## real access, the stores just ran dry) -- "they shouldn't get mad if they
+## have access": only the denied-access case blames the leader personally.
+func blame_leader_for_hunger_death(fallen_name: String, denied_access: bool = true) -> void:
+	if not denied_access:
+		TribeMemory.remember(member_name, "trauma", "You",
+			"%s starved even with real stockpile access -- the stores just ran dry." % fallen_name,
+			"grieving", -0.05)
+		_think("%s starved despite everything. The stores just ran out." % fallen_name, 2.6)
+		return
+	player_caused_deaths_witnessed += 1
+	var n: int = player_caused_deaths_witnessed
+	_ensure_core_memory().remember("hunger_neglect:%s" % fallen_name, true)
+	var cumulative: String = " You've let %d of us die now." % n if n >= 2 else ""
+	TribeMemory.remember(member_name, "trauma", "You",
+		"%s starved while you let the stockpile run dry. That's on you.%s" % [fallen_name, cumulative],
+		"resentful", -0.20)
+	_think("%s is dead because you didn't feed us!%s" % [fallen_name, cumulative], 2.6)
+	if n >= LOST_FAITH_DEATH_THRESHOLD:
+		# THOUGHTS DIRECTLY RESULT IN ACTIONS (2026-07-19): not just an
+		# escalating line -- real, permanent consequences once the pattern
+		# is undeniable, same as any other real betrayal in this game.
+		if is_backing_you:
+			is_backing_you = false
+			_think("I can't keep following a leader who lets this happen, again and again.", 3.0)
+		_maybe_shift_personality("Wary", "After watching %d of us starve, I've lost faith in your leadership." % n)
+	elif randf() < WITNESS_TRAUMA_CHANCE:
+		_maybe_shift_personality("Wary", "After watching %s starve, I trust your leadership less." % fallen_name)
+
+func witness_tribemate_death(fallen_name: String, by_player: bool) -> void:
+	if by_player:
+		player_caused_deaths_witnessed += 1
+		_ensure_core_memory().remember("betrayal:%s" % fallen_name, true)
+	else:
+		_ensure_core_memory().remember("death:%s" % fallen_name, false)
+	var n: int = player_caused_deaths_witnessed
+	var cumulative: String = " You've let %d of us die now." % n if by_player and n >= 2 else ""
+	var reason: String = ("%s is gone. The Leader did that to us.%s" % [fallen_name, cumulative]) if by_player \
+		else ("%s is gone. I won't forget it." % fallen_name)
+	TribeMemory.remember(member_name, "trauma", "You", reason, "grieving", -0.15 if by_player else -0.05)
+	if by_player and n >= LOST_FAITH_DEATH_THRESHOLD:
+		if is_backing_you:
+			is_backing_you = false
+			_think("I can't stay loyal to someone who keeps killing us.", 3.0)
+		_maybe_shift_personality("Wary", "After %d of us dead by your hand, I've lost faith in you." % n)
+	elif randf() < WITNESS_TRAUMA_CHANCE:
+		_maybe_shift_personality("Wary", "After losing %s, I trust the world less now." % fallen_name)
+
+func _maybe_shift_personality(target: String, reason: String) -> void:
+	if personality == target or not PERSONALITIES.has(target):
+		return
+	personality = target
+	TribeMemory.remember(member_name, "trauma", "You", reason, "neutral", 0.0)
+	_think(reason, 2.4)
+
+## Named destination for a just-made deposit, or "" for the shared camp --
+## used to spell out where a resident's surplus actually went instead of
+## leaving the player to guess why the home stockpile didn't move.
+func _deposit_destination_name() -> String:
+	if manager == null or not manager.has_method("_outpost_at"):
+		return ""
+	var o = manager._outpost_at(home_pos)
+	if o == null or not is_instance_valid(o):
+		return ""
+	return str(o.get("settlement_name"))
 var contrib_kills: int = 0
 var contrib_recruits: int = 0
 func productivity() -> int:
@@ -704,8 +1154,12 @@ func take_hit(dmg: float, attacker) -> void:
 	if anim:
 		anim.pop(0.5)            # flinch
 		anim.tension = 1.0       # and a moment of rattled nerves
+	_trauma_hit_count += 1
+	if _trauma_hit_count >= TRAUMA_HITS_PER_SHIFT:
+		_trauma_hit_count = 0
+		_maybe_shift_personality("Wary", "After everything I've survived, I trust the world less now.")
 	if hp <= 0.0:
-		die()
+		die(attacker)
 		return
 	if attacker == null or not is_instance_valid(attacker):
 		return
@@ -831,6 +1285,26 @@ func _maybe_share_food() -> void:
 		TribeMemory.remember(recv_name, "shared_food", giver_name,
 			"%s shared their food with me when I was hungry." % giver_name, "grateful", 0.02)
 		return   # one act of generosity per poll, not a firehose
+
+## "feeds strangers to at least 30% as a base" -- distinct from
+## _maybe_share_food() above, which only ever shares with EXISTING tribe
+## members (group "tribe"). This reaches actual outsiders (group "neutral",
+## not yet recruited at all) -- the founding recruiter's whole reason for
+## being good at winning people over. Rolled independently, so it doesn't
+## compete with or reduce the ordinary tribe-only sharing chance.
+func _maybe_feed_a_stranger() -> void:
+	if not is_founding_recruiter or inv_food <= 0:
+		return
+	if randf() > FOUNDING_RECRUITER_FEED_CHANCE:
+		return
+	for o in SpatialGrid.query(global_position, SHARE_RADIUS, "neutral"):
+		var n := o as Node3D
+		if n == null or not is_instance_valid(n):
+			continue
+		inv_food -= 1
+		TribeMemory.remember(member_name, "shared_food", str(n.get("member_name")),
+			"I gave food to a stranger -- word of my tribe's generosity spreads.", "warm", 0.0)
+		return
 
 ## How much this member's standing with the leader is worth toward accepting
 ## risky orders -- reused here as the "loyalty ranking" that peer talk and
@@ -997,10 +1471,10 @@ func _nearest_base_threat() -> Node3D:
 			best = n
 	return best
 
-func die() -> void:
-	print("[%s] has fallen." % member_name)
+func die(attacker = null, cause: String = "") -> void:
+	print("[%s] has fallen. (%s)" % [member_name, cause if cause != "" else "unknown cause"])
 	if manager and manager.has_method("on_member_died"):
-		manager.on_member_died(self)
+		manager.on_member_died(self, attacker, cause)
 	queue_free()
 
 # swing at whoever's attacking us — a club in hand (the tribe's shared rack)
@@ -1107,6 +1581,7 @@ func _physics_process(delta: float) -> void:
 			_sense_cd = SENSE_INTERVAL
 			_sense_environment()
 			_maybe_share_food()
+			_maybe_feed_a_stranger()
 
 	# register in the world spatial grid so rival npc.gd's "tribe" group
 	# queries (intruder/outnumber/war-target checks) can find us without
@@ -1277,8 +1752,48 @@ func _auto_work(delta: float) -> void:
 	if _job_cd > 0.0:
 		return
 	_job_cd = randf_range(3.0, 7.0)
+	_evaluate_peer_contribution()
 	if manager == null or not manager.has_method("suggest_job"):
 		return
+	# NIGHT AT THE FIRE (2026-07-19): "make night time come and tribes light
+	# campfires, gossip, talk, laugh, and do ceremonial dances around the
+	# fire" -- most idle members head to the real campfire (see
+	# campfire.gd/Tribemanager.is_night) instead of self-assigning ordinary
+	# work; a standing leader order (checked above, before this point) still
+	# overrides it, same precedence every other autonomous choice respects.
+	if manager.get("is_night") == true and randf() < 0.7 and _night_campfire_behavior():
+		return
+	# EXPERT RECRUITER (2026-07-19): the founding companion actively looks
+	# for a wanderer to win over rather than waiting on the tribe-wide
+	# suggest_job() roll (which only tries "recruit" ~20% of the time) --
+	# this is what "expert" actually means for them.
+	if is_founding_recruiter and _nearest_neutral() != null:
+		_start_job("recruit")
+		return
+	# PRACTICE-DRIVEN CRAFTING (2026-07-19): "professions have to use real
+	# materials from in game" + "npcs need to do all the abilities I've given
+	# them" -- a member who's already put real practice into Blacksmithing
+	# (skill_in > 0, so they've earned at least the next tier) occasionally
+	# forges their own upgrade on their own initiative, through the SAME
+	# gated craft_weapon()/craft_armor() path a player-directed order uses --
+	# real materials spent, same skill-tier gate, just self-initiated.
+	if RANK_LOYALTY.get(current_rank, 0) >= RANK_LOYALTY["Acquaintance"] and skill_in("Blacksmithing") > 0.0 and randf() < 0.15:
+		var next_weapon: int = mini(weapon + 1, WEAPON_TIERS.size() - 1)
+		if next_weapon > weapon and craft_weapon(next_weapon):
+			return
+		var next_armor: int = mini(armor + 1, ARMOR_TIERS.size() - 1)
+		if next_armor > armor and craft_armor(next_armor):
+			return
+	# ALL 30 PROFESSIONS PRODUCE (2026-07-19): the generic counterpart to the
+	# Blacksmithing-specific weapon/armor path above -- ANY profession this
+	# member has practiced at all gets a real, working, materials-spending
+	# action, not just skill numbers that never do anything. Same trust bar
+	# as the crafting path (Acquaintance+ -- a total Stranger doesn't get to
+	# spend the tribe's shared materials on their own initiative).
+	if RANK_LOYALTY.get(current_rank, 0) >= RANK_LOYALTY["Acquaintance"] and profession != "" \
+			and profession != "Blacksmithing" and skill_in(profession) > 0.0 and randf() < 0.15:
+		if _practice_and_produce(profession):
+			return
 	# MIGRATION (2026-07-31): so far only a settlement's FOUNDER ever actually
 	# lived there -- everyone else stayed anchored at the original camp
 	# forever. A small, ongoing chance for an otherwise-idle member to join
@@ -1286,7 +1801,14 @@ func _auto_work(delta: float) -> void:
 	# population across the clan's cities rather than leaving each one a
 	# population of one. Picks the LEAST populated settlement so migrants
 	# spread out instead of piling onto whichever was founded first.
-	if randf() < MIGRATE_CHANCE and manager.has_method("least_populated_outpost"):
+	# BUG FIXED (2026-07-19): this fired for EVERY member regardless of trust --
+	# a total Stranger could relocate to (and start drawing from/depositing
+	# into) a settlement's economy with zero loyalty earned, unlike every
+	# other autonomous action (which routes through give_order()'s
+	# ORDER_RISK/RANK_LOYALTY check). Migrating is a real commitment, not a
+	# chore, so gate it at the same bar as a trusted, self-directed gather.
+	if randf() < MIGRATE_CHANCE and RANK_LOYALTY.get(current_rank, 0) >= RANK_LOYALTY["Acquaintance"] \
+			and manager.has_method("least_populated_outpost"):
 		var dest = manager.least_populated_outpost(home_pos)
 		if dest != null:
 			_start_migrate((dest as Node3D).global_position)
@@ -1317,6 +1839,15 @@ func _start_migrate(dest: Vector3) -> void:
 	_think("Time to join the new settlement.", 2.5)
 
 func _start_job(job: String, forced: bool = false) -> void:
+	# BUG FIXED (2026-07-19): "build"/"carve" bypass give_order()'s ORDER_RISK
+	# check by design (see the comment above ORDER_RISK -- they're not in that
+	# table at all), which meant an UNFORCED (self-picked) build/carve had NO
+	# trust gate whatsoever: a total Stranger could raise fortress walls or
+	# spend the tribe's wood on a club the moment they wandered in. A leader's
+	# forced standing order still bypasses this untouched (that's deliberate --
+	# see _accept_order above); only the autonomous self-pick is gated now.
+	if not forced and job in ["build", "carve"] and current_rank == "Stranger":
+		return
 	if job == "carve":
 		_begin_carve()
 	elif job == "build":
@@ -1499,7 +2030,15 @@ func _hunger_step(delta: float) -> void:
 		starve(delta)                       # bond rots, may defect
 		hp = maxf(0.0, hp - delta * 2.0)    # and they physically weaken
 		if hp <= 0.0:
-			die()
+			# REAL CAUSE, NOT ASSUMED (2026-07-19): "they need to react to the
+			# real reason an npc died... they shouldn't get mad if they have
+			# access" -- a Stranger who starved was genuinely denied trust-
+			# based stockpile access (see the elif above); an Acquaintance+
+			# member who starved anyway HAD access -- the stockpile itself
+			# ran dry, a supply failure, not the leader denying them anything.
+			# on_member_died()/blame_leader_for_hunger_death() react
+			# differently to each.
+			die(null, "starvation" if current_rank == "Stranger" else "starvation_had_access")
 
 func _process(_delta: float) -> void:
 	# proximity to player (robust direct distance, no Area3D needed)
@@ -1631,8 +2170,22 @@ func brain_snapshot() -> String:
 		parts.append("You can hear signs of a rival nearby, even though you can't see them.")
 	return " ".join(parts)
 
+## SEASONAL MOOD MIGRATION (2026-07-19): a real, continuously-updated read of
+## how often THIS member's own Trust/Follow neurons are actually firing --
+## the tribe-wide aggregate of this (see Tribemanager._mood_tick()) is what
+## decides whether the tribe splits, driven by real brain activity instead
+## of a scripted "morale" number.
+const TRUST_FOLLOW_EMA_DECAY := 0.995
+var _trust_follow_ema: float = 0.5
+func trust_follow_mood() -> float:
+	return _trust_follow_ema
+
 func _brain_tick() -> void:
 	var fired: Array = brain.step()
+	if not fired.is_empty():
+		_drum_fired_neurons(fired)
+	var tf: float = 1.0 if ("Trust" in fired or "Follow" in fired) else 0.0
+	_trust_follow_ema = _trust_follow_ema * TRUST_FOLLOW_EMA_DECAY + tf * (1.0 - TRUST_FOLLOW_EMA_DECAY)
 	if "Follow" in fired:
 		follow_fires += 1
 		relationship = minf(RELATIONSHIP_MAX, relationship + FOLLOW_FIRE_REL_GAIN)
@@ -1643,11 +2196,55 @@ func _brain_tick() -> void:
 	# strengthen trust connections that just co-fired (visible learning)
 	brain.learn(1.0, 0.5)
 
+## Called externally by Tribemanager when the TRIBE'S aggregate mood (not
+## this member's own relationship threshold) has been low for too long --
+## a real collective consequence, distinct from the existing individual
+## defection path (relationship < DEFECT_THRESHOLD, see _process below).
+func mass_migrate_out(reason: String) -> void:
+	if _leaving:
+		return
+	is_backing_you = false
+	_leaving = true
+	_think(reason, 3.0)
+
+## GENERATIVE DRUM CIRCLE (2026-07-19): "the tribe's actual trust/fear/hunger
+## dynamics becoming the literal rhythm of their music" -- every real neuron
+## fire is a real, timestamped event already; this is the ONLY place that
+## decides whether it's audible right now (TribeDrums itself just owns the
+## synthesis, not this judgment). Scoped to gathered, idle members at the
+## real campfire at night -- the actual drum circle moment this game
+## already has, not constant background noise from the whole map.
+## Real, measured mechanism (npc_rhythm_sync_experiment.gd, 6/6 seeds,
+## 2026-07-19): completely independent brains phase-lock into a real drum
+## circle purely from each one hearing the SAME shared ambient level and
+## feeding a little of it back into its own firing. Every gathered member
+## reads TribeDrums' one shared ambient scalar and feeds it back into its
+## own "Trust" neuron -- the confirmed coupling mechanism, pointed at the
+## real trust-economy brain instead of a bare test oscillator.
+const RHYTHM_COUPLING := 0.20   # the value the experiment found already saturates near-full lock
+func _drum_fired_neurons(fired: Array) -> void:
+	if manager == null or manager.get("is_night") != true:
+		return
+	var fire := _nearest_campfire()
+	if fire == null or global_position.distance_to(fire.global_position) > TribeDrums.CAMPFIRE_AUDIBLE_RANGE:
+		return
+	for name in fired:
+		var velocity: float = brain.fire_strength(str(name)) if brain.has_method("fire_strength") else 1.0
+		TribeDrums.on_neuron_fired(str(name), true, velocity)
+	var ambient: float = TribeDrums.ambient_level()
+	if ambient > 0.0:
+		brain.stimulate("Trust", RHYTHM_COUPLING * ambient * 50.0)
+
 func _update_rank() -> void:
+	_ensure_rank_gates()
 	var new_rank := "Stranger"
 	for r in RANKS:
-		if relationship >= float(r[1]):
-			new_rank = String(r[0])
+		var name: String = String(r[0])
+		if name == "Stranger":
+			continue
+		var attained: bool = (_rank_gates[name] as HysteresisGate).update(relationship)
+		if attained:
+			new_rank = name   # RANKS is ascending, so the last attained gate wins
 	if new_rank != current_rank:
 		var rose: bool = int(RANK_LOYALTY.get(new_rank, 0)) > int(RANK_LOYALTY.get(current_rank, 0))
 		current_rank = new_rank
@@ -1838,8 +2435,40 @@ func give_order(kind: String, paid: bool = false, interrupt: bool = false) -> bo
 	if drive >= risk:
 		_accept_order(kind, false)
 		return true
+	# AUTO-ASSUME TRUSTED WORK (2026-07-19): "npcs constantly refusing work
+	# orders, they should auto assume work if they don't trust enough to do
+	# it, only auto assign what trust allows" -- a flat refusal used to just
+	# leave them standing idle until the next autonomous re-roll (which could
+	# propose the exact same too-risky job right back, on a self-directed
+	# pick). Now a refusal falls through to the MOST substantial real work
+	# this member's own current drive genuinely clears -- real delegation
+	# downward, not a bypass: it's still gated by the same drive/risk math,
+	# just against a lower bar than what was actually asked for.
+	var fallback: String = _best_trusted_fallback(drive, kind)
+	if fallback != "":
+		_think("I don't trust you enough for that yet -- I'll %s instead." % fallback, 2.4)
+		TribeMemory.remember(member_name, "ordered", "You",
+			"You asked me to %s, but I only trust you enough to %s." % [kind, fallback], "neutral", 0.0)
+		_accept_order(fallback, false)
+		return true
 	_refuse_order(kind)
 	return false
+
+## Highest-risk (most substantial) order kind this member's CURRENT drive
+## actually clears, excluding the one just refused and "come" (a summons,
+## not real work). Empty string if nothing at all is trusted yet -- a true
+## Stranger with a timid personality genuinely has nothing to fall back to.
+const FALLBACK_ORDER := ["scout", "guard", "hunt", "mine", "recruit", "gather", "wood"]
+
+func _best_trusted_fallback(drive: int, exclude_kind: String) -> String:
+	for k in FALLBACK_ORDER:
+		if k == exclude_kind:
+			continue
+		if k == "hunt" and (manager == null or not manager.has_method("clubs_available") or manager.clubs_available() <= 0):
+			continue
+		if drive >= int(ORDER_RISK.get(k, 999)):
+			return k
+	return ""
 
 func _accept_order(kind: String, paid: bool = false) -> void:
 	is_busy = true
@@ -1922,6 +2551,14 @@ func _accept_order(kind: String, paid: bool = false) -> void:
 				_think("Off to chop wood.", 2.0)
 			else:
 				_begin_fallback("No trees nearby to chop...")
+		"mine":
+			_work_time = 26.0   # minerals sit up in the hills -- a real hike
+			_target_node = _nearest_mineral()
+			if _target_node:
+				_search_streak = 0
+				_think("Off to the hills to mine.", 2.0)
+			else:
+				_begin_fallback("No ore or stone nearby to mine...")
 		"guard":
 			_work_time = 999999.0   # indefinite — holds the post until reassigned
 			# is_busy/_task_kind are already set above, before this match runs,
@@ -1984,8 +2621,14 @@ func _begin_fallback(msg: String) -> void:
 			return
 	var radius: float = minf(SEARCH_RADIUS_MAX,
 		SEARCH_RADIUS_BASE + float(_search_streak - 1) * SEARCH_RADIUS_GROWTH)
-	var ang := randf() * TAU
-	_target = global_position + Vector3(cos(ang), 0.0, sin(ang)) * radius
+	if _search_streak <= 1:
+		# first failure of a fresh streak -- lock in a heading and an origin,
+		# both held fixed for the rest of this streak (see the comment on
+		# _search_dir above)
+		var ang := randf() * TAU
+		_search_dir = Vector3(cos(ang), 0.0, sin(ang))
+		_search_origin = global_position
+	_target = _search_origin + _search_dir * radius
 	_target.y = home_pos.y
 	_target_node = null
 	_think(msg, 2.2)
@@ -2012,6 +2655,77 @@ func _begin_return() -> void:
 		var ang := randf() * TAU
 		_target = global_position + Vector3(cos(ang), 0.0, sin(ang)) * randf_range(2.0, 4.0)
 		_target.y = global_position.y
+
+## AWARENESS FIX (2026-07-19): minerals never had a picker at all -- see
+## mineral.gd's own SpatialGrid registration comment. Mirrors _nearest_tree().
+func _nearest_mineral() -> Node3D:
+	var best: Node3D = null
+	var bd := INF
+	var sight := _effective_sight()
+	for m in SpatialGrid.query(global_position, sight, "mineral"):
+		var n := m as Node3D
+		if n == null or not is_instance_valid(n) or not n.has_method("collect"):
+			continue
+		var d := global_position.distance_to(n.global_position)
+		if d > sight or d >= bd:
+			continue
+		if _is_claimed(n):
+			continue
+		bd = d
+		best = n
+	return best
+
+func _do_mine() -> void:
+	if _target_node and _target_node.has_method("collect"):
+		var loot: Dictionary = _target_node.collect()
+		var got: int = int(loot.get("amount", 0))
+		_task_mats += got
+		_task_result = "%s x%d" % [str(loot.get("type", "ore")), got]
+		practice_profession("Mining")
+
+const NIGHT_CAMPFIRE_RANGE := 2.5
+const NIGHT_FIRE_LINES := [
+	"Ha! You should have seen it -- I nearly lost my footing chasing that deer.",
+	"They say the next valley over has better hunting grounds.",
+	"Did you hear? Someone spotted a rival scout near the tree line today.",
+	"I'm just glad to sit a while. My feet ache.",
+	"Dance with me -- the fire's warm and the night is young!",
+	"Gossip travels faster than any courier around this fire.",
+]
+
+func _nearest_campfire() -> Node3D:
+	var best: Node3D = null
+	var bd := INF
+	for f in get_tree().get_nodes_in_group("campfire"):
+		var n := f as Node3D
+		if n == null or not is_instance_valid(n):
+			continue
+		var d := global_position.distance_to(n.global_position)
+		if d < bd:
+			bd = d
+			best = n
+	return best
+
+## Idle members gather at the real campfire at night -- gossip, laughter,
+## a bit of dancing (a playful spin via anim.pop, no dedicated dance
+## animation exists). Returns true if this member is participating this
+## tick (so _auto_work() knows not to also assign ordinary work).
+func _night_campfire_behavior() -> bool:
+	var fire := _nearest_campfire()
+	if fire == null:
+		return false
+	if global_position.distance_to(fire.global_position) > NIGHT_CAMPFIRE_RANGE:
+		var ang := randf() * TAU
+		_target = fire.global_position + Vector3(cos(ang), 0.0, sin(ang)) * 1.5
+		_target.y = home_pos.y
+		_target_node = null
+		state = St.WANDER
+		return true
+	if randf() < 0.25:
+		say(NIGHT_FIRE_LINES[randi() % NIGHT_FIRE_LINES.size()], 2.5)
+		if anim:
+			anim.pop(0.6)   # a little spin/bounce -- the closest thing to a dance step
+	return true
 
 func _do_gather() -> void:
 	if _target_node and _target_node.has_method("harvest"):
@@ -2070,11 +2784,19 @@ func _is_claimed(n: Node3D) -> bool:
 ## checked FIRST (cheap, local math, no group lookup); _is_claimed() only
 ## runs on a candidate that has already cleared all of those -- for a
 ## typical camp that's a handful of calls per pick, not one per tree.
+## SEARCH-EFFICIENCY FIX (2026-07-19): these four pickers used to scan
+## get_tree().get_nodes_in_group(...) -- EVERY food_source/tree/animal/neutral
+## in the whole world -- on every single call, discarding almost all of them
+## on the cheap distance check right after. Now that food_source/tree/animal
+## register with SpatialGrid (see their own scripts) and npc.gd already does
+## for "neutral", these query only the handful of grid cells actually within
+## sight -- the search got both LONGER RANGE (SIGHT_RADIUS above) and CHEAPER
+## per call at the same time, instead of those trading off against each other.
 func _nearest_food_source() -> Node3D:
 	var best: Node3D = null
 	var bd := INF
 	var sight := _effective_sight()
-	for b in get_tree().get_nodes_in_group("food_source"):
+	for b in SpatialGrid.query(global_position, sight, "food_source"):
 		var n := b as Node3D
 		if n == null or not is_instance_valid(n) or not n.has_method("harvest") or float(n.amount) < 1.0:
 			continue
@@ -2091,7 +2813,7 @@ func _nearest_animal() -> Node3D:
 	var best: Node3D = null
 	var bd := INF
 	var sight := _effective_sight()
-	for a in get_tree().get_nodes_in_group("animal"):
+	for a in SpatialGrid.query(global_position, sight, "animal"):
 		var n := a as Node3D
 		if n == null or not is_instance_valid(n):
 			continue
@@ -2108,7 +2830,7 @@ func _nearest_neutral() -> Node3D:
 	var best: Node3D = null
 	var bd := INF
 	var sight := _effective_sight()
-	for n in get_tree().get_nodes_in_group("neutral"):
+	for n in SpatialGrid.query(global_position, sight, "neutral"):
 		var nn := n as Node3D
 		if nn == null or not is_instance_valid(nn):
 			continue
@@ -2149,7 +2871,7 @@ func _nearest_tree() -> Node3D:
 	# tree_count can be in the THOUSANDS on a big world -- see the perf-fix
 	# comment on _nearest_food_source() above; the same cheap-first ordering
 	# matters even more here.
-	for t in get_tree().get_nodes_in_group("tree"):
+	for t in SpatialGrid.query(global_position, sight, "tree"):
 		var n := t as Node3D
 		if n == null or not is_instance_valid(n) or not n.has_method("chop"):
 			continue
@@ -2168,6 +2890,7 @@ func _retarget() -> Node3D:
 		"gather": return _nearest_food_source()
 		"wood": return _nearest_tree()
 		"recruit": return _nearest_neutral()
+		"mine": return _nearest_mineral()
 	return null
 
 func _refuse_order(kind: String) -> void:
@@ -2328,6 +3051,16 @@ func _complete_task() -> void:
 		var surplus := _task_food - keep
 		if surplus > 0 and manager and manager.has_method("add_food_at"):
 			manager.add_food_at(home_pos, surplus)
+			# BUG FIXED (2026-07-19): "stockpile shows no value change" was
+			# real player confusion, not a routing bug -- per-settlement
+			# economies (added earlier) mean a resident's surplus grows THEIR
+			# settlement's local_food, not the shared camp's, so watching the
+			# home stockpile while a settlement resident deposits legitimately
+			# shows nothing moving. Naming the actual destination here removes
+			# the ambiguity instead of leaving it to guesswork.
+			var dest := _deposit_destination_name()
+			if dest != "":
+				_task_result = "%s (into %s)" % [_task_result, dest]
 		contrib_food += _task_food
 	if _task_mats > 0 and manager and manager.has_method("add_materials_at"):
 		manager.add_materials_at(home_pos, _task_mats)
@@ -2343,6 +3076,13 @@ func _complete_task() -> void:
 
 	# a well-supplied camp lets members forge better gear from looted materials
 	_maybe_upgrade_gear()
+
+	# a real, positive contribution to the tribe can gradually soften someone
+	# into a more trusting archetype -- the counterpart to take_hit()'s
+	# trauma-hardening below, both driven by lived experience, not a slider
+	if not _task_paid and (contrib_food + contrib_wood) >= _next_contrib_shift_at:
+		_maybe_shift_personality("Trusting", "Helping this tribe again and again... I believe in this now.")
+		_next_contrib_shift_at += CONTRIB_SHIFT_INTERVAL
 
 	var msg: String = _task_result if _task_result != "" else "nothing this time"
 	_think("Done. %s" % msg, 3.0)
@@ -2496,6 +3236,10 @@ func _move(delta: float) -> void:
 		if not is_instance_valid(_foe) or global_position.distance_to((_foe as Node3D).global_position) > 16.0:
 			_foe = null
 		else:
+			# real panic (SSH "hopping disorder") -- see npc_core_memory.gd.
+			# small per-tick jitter so a whole fight compounds real stress
+			# rather than one instant spike.
+			_apply_memory_stress(0.08)
 			_defend_attack_cd = maxf(0.0, _defend_attack_cd - delta)
 			_throw_cd = maxf(0.0, _throw_cd - delta)
 			var fp: Vector3 = (_foe as Node3D).global_position
@@ -2528,6 +3272,8 @@ func _move(delta: float) -> void:
 			if _target_node != null:
 				var d := global_position.distance_to(_target_node.global_position)
 				var reach := CATCH_RANGE if _task_kind == "hunt" else (2.4 if (_task_kind == "wood" or _task_kind == "recruit") else HARVEST_RANGE)
+				# ("mine" uses the HARVEST_RANGE fallback above -- same one-shot
+				# arrival pattern as gather/hunt, see below)
 				if d > reach:
 					var chase := 3.6 if _task_kind == "hunt" else move_speed   # outrun fleeing prey
 					_steer_to(_target_node.global_position, delta, chase)
@@ -2541,6 +3287,9 @@ func _move(delta: float) -> void:
 					_begin_return()
 				elif _task_kind == "recruit":
 					_do_recruit()
+					_begin_return()
+				elif _task_kind == "mine":
+					_do_mine()
 					_begin_return()
 				elif _task_kind == "wood":
 					# stand and chop until the tree comes down
