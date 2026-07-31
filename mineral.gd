@@ -46,25 +46,65 @@ func _ready() -> void:
 	# had no way to see them at all (no SpatialGrid registration, no picker).
 	# Registering here is what tribemember.gd's new _nearest_mineral() reads.
 	call_deferred("_register_with_grid")
-	var mesh := MeshInstance3D.new()
-	var bm := BoxMesh.new()
 	# gems are small and precious, ore chunky, stone broad
 	var s := 0.7 if mat_type == "Gems" else (1.1 if mat_type == "Ore" else 1.4)
-	bm.size = Vector3(s, s * 0.8, s)
-	mesh.mesh = bm
 	var _ore_col: Color = COLORS.get(mat_type, Color(0.6, 0.6, 0.6))
 	var _ore_met: float = 0.6 if mat_type == "Ore" else (0.2 if mat_type == "Gems" else 0.0)
 	var _ore_rough: float = 0.4 if mat_type == "Gems" else 0.9
+
+	# REAL ASSET (2026-07-27): a real Kenney Nature Kit rock model (CC0,
+	# downloaded not generated), still recolored per mat_type via
+	# material_override -- same convention as before, just a real rock
+	# silhouette under the tint instead of a bare cube. Falls back to the old
+	# BoxMesh if the asset is ever missing.
+	var mesh: MeshInstance3D = _try_real_rock_mesh()
+	if mesh == null:
+		mesh = MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(s, s * 0.8, s)
+		mesh.mesh = bm
+		mesh.position.y = s * 0.4
+	else:
+		mesh.scale = Vector3(s, s, s)
 	mesh.material_override = MatCache.flat(_ore_col, _ore_rough, _ore_met)
-	mesh.position.y = s * 0.4
 	add_child(mesh)
+
 	var col := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = bm.size
+	box.size = Vector3(s, s * 0.8, s)
 	col.shape = box
 	col.position.y = s * 0.4
 	add_child(col)
 	set_process(true)
+
+## One real rock model reused for every mineral type (recolored per-type
+## above), scaled to this instance's size tier. Rock silhouette is generic
+## enough that "Gems"/"Ore"/"Stone"/etc. read fine as the same rough shape in
+## different materials -- matches how the old BoxMesh was also one shape,
+## many colors.
+const ROCK_GLB := "res://assets/nature/rock_largeA.glb"
+
+func _try_real_rock_mesh() -> MeshInstance3D:
+	if not ResourceLoader.exists(ROCK_GLB):
+		return null
+	var packed: PackedScene = load(ROCK_GLB)
+	var inst := packed.instantiate()
+	var found := _find_mesh(inst)
+	if found == null:
+		inst.queue_free()
+		return null
+	found.get_parent().remove_child(found)
+	inst.queue_free()
+	return found
+
+func _find_mesh(root_node: Node) -> MeshInstance3D:
+	if root_node is MeshInstance3D:
+		return root_node as MeshInstance3D
+	for c in root_node.get_children():
+		var f := _find_mesh(c)
+		if f != null:
+			return f
+	return null
 
 func _process(delta: float) -> void:
 	_cd -= delta

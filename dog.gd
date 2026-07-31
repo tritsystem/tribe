@@ -57,11 +57,17 @@ var _player: Node3D = null
 var _flee_timer: float = 0.0
 var _tick_accum: float = 0.0
 const TICK_HZ := 10.0
-var _head: MeshInstance3D = null
+## BUG FIXED (same as animal.gd's own fix): the real model's HeadMarker is a
+## plain Node3D empty (no mesh of its own, just an eye-attachment point), not
+## a MeshInstance3D like the old primitive sphere head was.
+var _head: Node3D = null
 var _label: Label3D = null
 var _color: Color = Color(0.55, 0.45, 0.32)
 var _stuck_cd: float = 0.0       # throttles the snagged-on-something check
 var _last_pos: Vector3 = Vector3.ZERO
+var _legs: Array = []            # Leg0..Leg3 (real model only) -- see _animate_legs()
+var _leg_phase: float = 0.0
+var _tinted_meshes: Array = []   # every MeshInstance3D _recolor() should tint (real model: body+nose+legs; primitive: Mesh+head)
 
 const BRAIN := """# Spikeling Neural Configuration
 neuron SeeFoe    threshold=50 leak=22
@@ -92,45 +98,101 @@ func is_loyal() -> bool:
 	return loyalty >= TAME_AT
 
 # ── build a low four-ish-legged silhouette (body + head + collision) ──
+## REAL ASSET (2026-07-27): reuses assets/animals/wolf.glb (already a real
+## Blender-modeled quadruped with a proper leg rig -- see tools/gen_animals.py
+## and animal.gd's own "REAL MODELED ASSETS" pass) instead of a bare capsule.
+## A dog and a wolf share the same silhouette closely enough that no new
+## asset is needed; scaled down slightly and recolored (the model's baked
+## material is a flat, non-textured albedo color -- see gen_animals.py's
+## make_material() -- so material_override recoloring is safe, unlike the
+## downloaded Kenney packs' textured assets). Falls back to the old
+## primitive capsule+sphere+boxes if the asset is ever missing.
 func _build() -> void:
-	var mat := MatCache.flat(_color)
+	if not _try_real_wolf_model():
+		var mat := MatCache.flat(_color)
 
-	var body := MeshInstance3D.new()
-	body.name = "Mesh"
-	var cap := CapsuleMesh.new()
-	cap.radius = 0.26
-	cap.height = 1.05
-	body.mesh = cap
-	body.rotation_degrees = Vector3(90, 0, 0)   # lie the capsule on its side
-	body.position = Vector3(0, 0.5, 0)
-	body.material_override = mat
-	add_child(body)
+		var body := MeshInstance3D.new()
+		body.name = "Mesh"
+		var cap := CapsuleMesh.new()
+		cap.radius = 0.26
+		cap.height = 1.05
+		body.mesh = cap
+		body.rotation_degrees = Vector3(90, 0, 0)   # lie the capsule on its side
+		body.position = Vector3(0, 0.5, 0)
+		body.material_override = mat
+		add_child(body)
+		_tinted_meshes.append(body)
 
-	_head = MeshInstance3D.new()
-	var hs := SphereMesh.new()
-	hs.radius = 0.2
-	hs.height = 0.4
-	_head.mesh = hs
-	_head.position = Vector3(0, 0.62, 0.55)
-	_head.material_override = mat
-	add_child(_head)
+		_head = MeshInstance3D.new()
+		var hs := SphereMesh.new()
+		hs.radius = 0.2
+		hs.height = 0.4
+		_head.mesh = hs
+		_head.position = Vector3(0, 0.62, 0.55)
+		_head.material_override = mat
+		add_child(_head)
+		_tinted_meshes.append(_head)
 
-	var snout := MeshInstance3D.new()
-	var sb := BoxMesh.new()
-	sb.size = Vector3(0.14, 0.12, 0.22)
-	snout.mesh = sb
-	snout.position = Vector3(0, 0.57, 0.74)
-	snout.material_override = mat
-	add_child(snout)
+		var snout := MeshInstance3D.new()
+		var sb := BoxMesh.new()
+		sb.size = Vector3(0.14, 0.12, 0.22)
+		snout.mesh = sb
+		snout.position = Vector3(0, 0.57, 0.74)
+		snout.material_override = mat
+		add_child(snout)
 
-	var tail := MeshInstance3D.new()
-	var tb := BoxMesh.new()
-	tb.size = Vector3(0.07, 0.07, 0.4)
-	tail.mesh = tb
-	tail.position = Vector3(0, 0.62, -0.6)
-	tail.rotation_degrees = Vector3(35, 0, 0)
-	tail.material_override = mat
-	add_child(tail)
+		var tail := MeshInstance3D.new()
+		var tb := BoxMesh.new()
+		tb.size = Vector3(0.07, 0.07, 0.4)
+		tail.mesh = tb
+		tail.position = Vector3(0, 0.62, -0.6)
+		tail.rotation_degrees = Vector3(35, 0, 0)
+		tail.material_override = mat
+		add_child(tail)
+
+		var col := CollisionShape3D.new()
+		var shape := CapsuleShape3D.new()
+		shape.radius = 0.3
+		shape.height = 1.0
+		col.shape = shape
+		col.rotation_degrees = Vector3(90, 0, 0)
+		col.position = Vector3(0, 0.5, 0)
+		add_child(col)
+
+	_label = Label3D.new()
+	_label.position = Vector3(0, 1.2, 0)
+	_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_label.font_size = 26
+	_label.outline_size = 6
+	add_child(_label)
+	_update_label()
+	_recolor()   # the wolf model's own baked grey isn't the dog's actual tint
+
+func _try_real_wolf_model() -> bool:
+	var glb_path := "res://assets/animals/wolf.glb"
+	if not ResourceLoader.exists(glb_path):
+		return false
+	var packed: PackedScene = load(glb_path)
+	var model := packed.instantiate()
+	model.name = "Mesh"
+	model.scale = Vector3(0.85, 0.85, 0.85)   # a dog reads a touch smaller than a wolf
+	add_child(model)
+
+	var marker := _find_node_named(model, "HeadMarker")
+	_head = (marker as Node3D) if marker != null else model
+	_build_googly_eyes(_head, 0.2 * 0.85)
+
+	for i in range(4):
+		var leg := _find_node_named(model, "Leg%d" % i)
+		if leg != null and leg is Node3D:
+			_legs.append(leg)
+			_tinted_meshes.append(leg)
+	var body_mesh := _find_node_named(model, "Wolf")
+	if body_mesh != null:
+		_tinted_meshes.append(body_mesh)
+	var nose := _find_node_named(model, "Nose")
+	if nose != null:
+		_tinted_meshes.append(nose)
 
 	var col := CollisionShape3D.new()
 	var shape := CapsuleShape3D.new()
@@ -140,21 +202,48 @@ func _build() -> void:
 	col.rotation_degrees = Vector3(90, 0, 0)
 	col.position = Vector3(0, 0.5, 0)
 	add_child(col)
+	return true
 
-	_label = Label3D.new()
-	_label.position = Vector3(0, 1.2, 0)
-	_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	_label.font_size = 26
-	_label.outline_size = 6
-	add_child(_label)
-	_update_label()
+## Recursive child-name search -- same small helper animal.gd/npc.gd/
+## tribemember.gd each keep their own copy of.
+func _find_node_named(root_node: Node, part_name: String) -> Node:
+	if root_node.name == part_name:
+		return root_node
+	for c in root_node.get_children():
+		var found := _find_node_named(c, part_name)
+		if found != null:
+			return found
+	return null
+
+# two white sphere "eyes" with off-center black pupils -- same shared look
+# every creature in this game uses, attached to the real model's HeadMarker.
+func _build_googly_eyes(parent: Node3D, head_radius: float) -> void:
+	for side in [-1.0, 1.0]:
+		var eye := MeshInstance3D.new()
+		var es := SphereMesh.new()
+		es.radius = head_radius * 0.32
+		es.height = head_radius * 0.64
+		eye.mesh = es
+		eye.position = Vector3(side * head_radius * 0.55, head_radius * 0.25, head_radius * 0.85)
+		eye.material_override = MatCache.flat(Color(1, 1, 1))
+		parent.add_child(eye)
+
+		var pupil := MeshInstance3D.new()
+		var ps := SphereMesh.new()
+		ps.radius = head_radius * 0.14
+		ps.height = head_radius * 0.28
+		pupil.mesh = ps
+		pupil.position = Vector3(randf_range(-0.04, 0.04) * head_radius, randf_range(-0.04, 0.04) * head_radius, head_radius * 0.3)
+		pupil.material_override = MatCache.flat(Color(0.05, 0.05, 0.05))
+		eye.add_child(pupil)
 
 func _recolor() -> void:
 	# loyal dogs warm to a friendly tan; the collar-flash sells the bond
 	_color = Color(0.72, 0.56, 0.30) if is_loyal() else Color(0.5, 0.5, 0.52)
-	for n in [get_node_or_null("Mesh"), _head]:
-		if n:
-			(n as MeshInstance3D).material_override = MatCache.flat(_color)
+	var mat := MatCache.flat(_color)
+	for n in _tinted_meshes:
+		if n is MeshInstance3D and is_instance_valid(n):
+			(n as MeshInstance3D).material_override = mat
 
 func _update_label() -> void:
 	if _label == null:
@@ -245,6 +334,29 @@ func _animate_body(delta: float) -> void:
 	anim.tension = clampf(brain.get_potential("SeeFoe") / 50.0, 0.0, 1.0)
 	anim.mood = 0.4 if (is_loyal() and _foe != null) else (0.15 if is_loyal() else -0.1)
 	anim.tick(delta, spd, is_on_floor())
+	_animate_legs(delta, spd)
+
+## Real per-leg walk cycle (real model only -- _legs stays empty on the old
+## primitive fallback, so this quietly no-ops there). Diagonal/trot gait,
+## same technique as animal.gd's 4-leg version, including its Z-axis fix
+## ("legs go sideways not forward/backward" -- see that file's own comment).
+const LEG_SWING_MAX := 0.55
+const LEG_SWING_REF_SPEED := 2.6
+
+func _animate_legs(delta: float, speed: float) -> void:
+	if _legs.size() < 4:
+		return
+	var move := clampf(speed / LEG_SWING_REF_SPEED, 0.0, 1.0)
+	if move < 0.03:
+		for l in _legs:
+			(l as Node3D).rotation.z = move_toward((l as Node3D).rotation.z, 0.0, delta * 6.0)
+		return
+	_leg_phase += delta * (5.0 + speed * 2.5)
+	var swing := LEG_SWING_MAX * move
+	(_legs[0] as Node3D).rotation.z = sin(_leg_phase) * swing          # front-left
+	(_legs[3] as Node3D).rotation.z = sin(_leg_phase) * swing          # back-right
+	(_legs[1] as Node3D).rotation.z = sin(_leg_phase + PI) * swing     # front-right
+	(_legs[2] as Node3D).rotation.z = sin(_leg_phase + PI) * swing     # back-left
 
 func _brain_tick() -> void:
 	_player = get_tree().get_first_node_in_group("player")
@@ -260,7 +372,73 @@ func _brain_tick() -> void:
 		anim.pop(0.3)
 
 # ─────────────────────────────────────────────────────────────────────────────
+## TURTLE-ISLAND AWARENESS (2026-07-27): see tribemember.gd's own copy of this
+## fix for the full reasoning (including two bugs found via a live
+## debug-teleport test: running the AI alongside the swim produces a stable
+## orbit, and swimming via move_and_slide() orbits too since the disc's
+## collision is a solid cylinder whose SIDE a horizontal swim collides with
+## and slides along rather than crossing -- fixed by skipping the normal AI
+## entirely while swimming, and using a direct position write that climbs
+## toward the deck's height instead of move_and_slide()). Dogs have no fixed
+## owning tribe (a wild stray may not be on the player's own island), so the
+## home turtle is resolved once (nearest to `home`, the guard/spawn anchor)
+## and cached.
 func _move(delta: float) -> void:
+	if _turtle_swim_recovery(delta):
+		return
+	_move_impl(delta)
+
+const TURTLE_SWIM_SPEED := 3.5
+var _cached_home_turtle = null
+
+func _resolve_home_turtle():
+	if _cached_home_turtle != null and is_instance_valid(_cached_home_turtle):
+		return _cached_home_turtle
+	if manager == null:
+		return null
+	var best = null
+	var best_d := INF
+	var pi = manager.get("player_island")
+	if pi != null and is_instance_valid(pi):
+		best_d = Vector2(home.x - pi.global_position.x, home.z - pi.global_position.z).length()
+		best = pi
+	if "world_tribes" in manager:
+		for wt in manager.world_tribes:
+			if wt == null or not is_instance_valid(wt):
+				continue
+			var d := Vector2(home.x - wt.global_position.x, home.z - wt.global_position.z).length()
+			if d < best_d:
+				best_d = d
+				best = wt
+	_cached_home_turtle = best
+	return best
+
+func _turtle_swim_recovery(delta: float) -> bool:
+	if manager == null or not bool(manager.get("turtle_islands")):
+		return false
+	var home_turtle = _resolve_home_turtle()
+	if home_turtle == null or not is_instance_valid(home_turtle):
+		return false
+	var r: float = float(home_turtle.get("turtle_radius"))
+	if r <= 0.0:
+		return false
+	var away: Vector3 = global_position - home_turtle.global_position
+	away.y = 0.0
+	var d := away.length()
+	if d <= r - 2.0:
+		return false   # safely on the disc -- normal AI movement applies
+	var dir: Vector3 = -away.normalized() if d > 0.01 else Vector3.FORWARD
+	global_position.x += dir.x * TURTLE_SWIM_SPEED * delta
+	global_position.z += dir.z * TURTLE_SWIM_SPEED * delta
+	# BUG FIX (2026-07-28): stop duplicating TURTLE_FREEBOARD as a local
+	# constant -- it drifted out of sync the moment the real one
+	# (turtle_island.gd) got retuned. Ask the turtle itself instead.
+	var deck_y: float = home_turtle.global_position.y + float(home_turtle.deck_height()) + 0.5
+	global_position.y = move_toward(global_position.y, deck_y, 2.5 * delta)
+	velocity = Vector3.ZERO
+	return true
+
+func _move_impl(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= gravity * delta
 	else:

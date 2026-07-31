@@ -12,11 +12,24 @@ var hp: float = 20.0
 var tint: Color = Color(0.55, 0.42, 0.28)
 var owner_tribe = null   # set by world_tribe.gd when it raises this teepee
 
+const TENT_GLB := "res://assets/survival/tent.glb"
+# real model measured at width 0.561m; scaled to match this game's existing
+# ~2.2m teepee base diameter (width-matched rather than height-matched -- a
+# tent is naturally low+wide where a teepee cone is tall+narrow, and matching
+# height alone would leave it looking oddly stretched).
+const TENT_SCALE := 2.2 / 0.561
+
 func _ready() -> void:
 	add_to_group("teepee")
 	_build()
 
+## REAL ASSET (2026-07-27): Kenney Survival Kit's tent.glb (CC0, downloaded
+## not generated) instead of a bare cone. Textured, used AS-IS (no
+## material_override -- would wipe the baked texture). Falls back to the old
+## cone+smoke-hole primitive if the asset is missing.
 func _build() -> void:
+	if _try_real_tent():
+		return
 	var cone := MeshInstance3D.new()
 	var cm := CylinderMesh.new()
 	cm.top_radius = 0.05
@@ -45,6 +58,15 @@ func _build() -> void:
 	# is still reachable for combat (siege routing, melee range checks) —
 	# those are distance/array based, not physics-collision based — so
 	# teepees stay fully destroyable, just not a movement obstacle.
+
+func _try_real_tent() -> bool:
+	if not ResourceLoader.exists(TENT_GLB):
+		return false
+	var packed: PackedScene = load(TENT_GLB)
+	var model := packed.instantiate()
+	model.scale = Vector3(TENT_SCALE, TENT_SCALE, TENT_SCALE)
+	add_child(model)
+	return true
 
 func take_damage(d: float, _attacker = null) -> void:
 	hp -= d

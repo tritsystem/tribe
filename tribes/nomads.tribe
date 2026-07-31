@@ -1,5 +1,6 @@
 archetype: Nomads
 material: Bone
+resources: Dried Meat, Bone, Leather
 
 traits:
   aggression: 0.0

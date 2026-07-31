@@ -1,5 +1,6 @@
 archetype: Wanderers
 material: Stone
+resources: Roots, Stone, Water
 
 traits:
   aggression: -0.15

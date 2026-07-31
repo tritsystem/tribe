@@ -16,6 +16,8 @@ const WC = preload("res://water_crossing.gd")   # shared boat-crossing state mac
 
 var brain: Spikeling
 var anim: BodyAnim
+var _legs: Array = []       # Leg0/Leg1 (real model only) -- see _animate_legs()
+var _leg_phase: float = 0.0
 var member_name: String = "Tribesperson"
 var personality: String = "Wild"
 
@@ -206,10 +208,22 @@ func _exit_tree() -> void:
 # instead of structures just appearing at the tribe's own position. ──
 var building: bool = false
 var _build_target: Vector3 = Vector3.ZERO
+# BUG FIX (2026-07-27): "buildings still in wrong spot" -- assign_build() used
+# to store _build_target as a bare world-space snapshot. On a turtle island
+# (drifting continuously) the camp moves out from under that fixed point
+# within seconds, so the builder walked toward and got stuck at an empty spot
+# in open water, and world_tribe.gd's own placement check (which recomputes
+# its target live off the tribe's CURRENT global_position, see
+# _build_palisade) never found the builder close enough -- the segment stayed
+# permanently claimed-but-unbuilt. Same stale-anchor bug already fixed for
+# npc.gd's `home` and tribemember.gd's `home_pos`; this is the third instance
+# of it, in the construction path specifically.
+var _build_offset: Vector3 = Vector3.ZERO
 
 func assign_build(pos: Vector3) -> void:
 	building = true
 	_build_target = pos
+	_build_offset = pos - (tribe.global_position if tribe != null and is_instance_valid(tribe) else Vector3.ZERO)
 
 func cancel_build() -> void:
 	building = false
@@ -306,26 +320,57 @@ func setup_neutral(h: Vector3) -> void:
 	_wander_target = h
 	_apply_color()
 
+## REAL MODELED ASSETS: four tiers, best first. (1) Quaternius's CC0
+## "Universal Base Characters" + "Universal Animation Library" -- a
+## genuinely higher-fidelity rig/mesh than Kenney's blocky "Mini Characters"
+## (the user's own "feels like Roblox" complaint about the old look). (2)
+## Kenney's CC0 "Mini Characters" -- a real rig with real baked walk/idle
+## animations, downloaded not generated, see AnimationPlayer wiring in
+## _animate_body(). (3) the Blender-generated body (tools/gen_humans.py) as
+## a fallback. (4) the original bare capsule if all three are somehow missing.
+const KENNEY_CHARACTERS := [
+	"character-male-a", "character-male-b", "character-male-c",
+	"character-male-d", "character-male-e", "character-male-f",
+	"character-female-a", "character-female-b", "character-female-c",
+	"character-female-d", "character-female-e", "character-female-f",
+]
+# Kenney's "Mini" characters ship at a stylized ~0.67m-tall scale -- scaled up
+# to match this game's existing ~1.75m human convention.
+const KENNEY_SCALE := 2.6
+var _kenney_anim: AnimationPlayer = null
+
+## QUATERNIUS UPGRADE (2026-07-27): built via a Blender headless pipeline
+## (tools not checked into this repo -- see the Obsidian project-work note)
+## that combines a Quaternius base body with a hairstyle mesh onto their
+## shared 65-bone rig (confirmed identical bone naming across the base-
+## character and animation-library glTFs before writing any retargeting
+## code, so this was a same-rig NLA bake, not real cross-rig retargeting),
+## and renames the animation library's own clip names onto this codebase's
+## "idle"/"walk"/"attack-melee-left"/"attack-melee-right"/"die" convention.
+## See assets/humans_quaternius/ -- 6 body+hair combinations.
+const QUATERNIUS_CHARACTERS := [
+	"quaternius_male_buzzed", "quaternius_male_simpleparted", "quaternius_male_bearded",
+	"quaternius_female_long", "quaternius_female_buns", "quaternius_female_buzzed",
+]
+# the combined body+hair export measures ~1.81m tall unscaled (already
+# full-adult scale, unlike Kenney's stylized ~0.67m) -- scaled down slightly
+# to match this game's existing ~1.75m human convention exactly.
+const QUATERNIUS_SCALE := 0.97
+var _quaternius_anim: AnimationPlayer = null
+
 func _build() -> void:
-	var body := MeshInstance3D.new()
-	body.name = "Mesh"
-	var cap := CapsuleMesh.new()
-	cap.radius = 0.35
-	cap.height = 1.6
-	body.mesh = cap
-	body.position = Vector3(0, 0.9, 0)
-	body.material_override = MatCache.flat(color)
-	add_child(body)
-	_build_googly_eyes(body, 0.35, 0.55)   # no separate head sphere — bias up toward the capsule top
+	# BUG FIX (2026-07-27): _club_model/_hp_bar/_crown used to be built ONLY
+	# inside _build_fallback_capsule() -- fine back when that was the only
+	# body path, but since _try_kenney_model()/_try_generated_model() both
+	# return early on success, EVERY NPC using either real-model tier (now
+	# the common case) silently never got a weapon visual, HP bar, or leader
+	# crown at all. Built once, unconditionally, regardless of which body
+	# tier actually rendered.
+	if not (_try_quaternius_model() or _try_kenney_model() or _try_generated_model()):
+		_build_fallback_capsule()
+	_build_combat_visuals()
 
-	var col := CollisionShape3D.new()
-	var shape := CapsuleShape3D.new()
-	shape.radius = 0.35
-	shape.height = 1.7
-	col.shape = shape
-	col.position = Vector3(0, 0.9, 0)
-	add_child(col)
-
+func _build_combat_visuals() -> void:
 	# a club held in hand, shown when the tribe is armed
 	_club_model = MeshInstance3D.new()
 	var clm := BoxMesh.new()
@@ -360,6 +405,127 @@ func _build() -> void:
 	_crown.visible = false
 	add_child(_crown)
 
+func _try_quaternius_model() -> bool:
+	var pick: String = QUATERNIUS_CHARACTERS[randi() % QUATERNIUS_CHARACTERS.size()]
+	var glb_path := "res://assets/humans_quaternius/%s.glb" % pick
+	if not ResourceLoader.exists(glb_path):
+		return false
+	var packed: PackedScene = load(glb_path)
+	var model := packed.instantiate()
+	var ap := _find_node_named(model, "AnimationPlayer") as AnimationPlayer
+	if ap == null:
+		model.queue_free()
+		return false
+	model.name = "QuaterniusModel"
+	model.scale = Vector3(QUATERNIUS_SCALE, QUATERNIUS_SCALE, QUATERNIUS_SCALE)
+	add_child(model)
+	_quaternius_anim = ap
+	# loop_mode isn't reliably set on glTF-imported clips -- the Animation
+	# resource is shared across every instance using this same character
+	# file, so setting it once here covers all of them.
+	for clip_name in ["walk", "idle"]:
+		if ap.has_animation(clip_name):
+			ap.get_animation(clip_name).loop_mode = Animation.LOOP_LINEAR
+	ap.play("idle")
+
+	var col := CollisionShape3D.new()
+	var shape := CapsuleShape3D.new()
+	shape.radius = 0.3
+	shape.height = 1.75
+	col.shape = shape
+	col.position = Vector3(0, 0.9, 0)
+	add_child(col)
+	return true
+
+func _try_kenney_model() -> bool:
+	var pick: String = KENNEY_CHARACTERS[randi() % KENNEY_CHARACTERS.size()]
+	var glb_path := "res://assets/humans_real/%s.glb" % pick
+	if not ResourceLoader.exists(glb_path):
+		return false
+	var packed: PackedScene = load(glb_path)
+	var model := packed.instantiate()
+	var ap := _find_node_named(model, "AnimationPlayer") as AnimationPlayer
+	if ap == null:
+		model.queue_free()
+		return false
+	model.name = "KenneyModel"
+	model.scale = Vector3(KENNEY_SCALE, KENNEY_SCALE, KENNEY_SCALE)
+	add_child(model)
+	_kenney_anim = ap
+	# loop_mode isn't reliably set on glTF-imported clips -- the Animation
+	# resource is shared across every instance using this same character
+	# file, so setting it once here covers all of them.
+	for clip_name in ["walk", "idle"]:
+		if ap.has_animation(clip_name):
+			ap.get_animation(clip_name).loop_mode = Animation.LOOP_LINEAR
+	ap.play("idle")
+
+	var col := CollisionShape3D.new()
+	var shape := CapsuleShape3D.new()
+	shape.radius = 0.3
+	shape.height = 1.75
+	col.shape = shape
+	col.position = Vector3(0, 0.9, 0)
+	add_child(col)
+	return true
+
+## Pulls the real "Mesh"/"Leg0"/"Leg1"/"HeadMarker" parts out of the glTF's
+## own wrapper node and reparents them flat onto `self`, matching every
+## existing get_node_or_null("Mesh") lookup (_apply_color(), anim.setup()).
+func _try_generated_model() -> bool:
+	var glb_path := "res://assets/humans/human.glb"
+	if not ResourceLoader.exists(glb_path):
+		return false
+	var packed: PackedScene = load(glb_path)
+	var model := packed.instantiate()
+	var mesh_node := _find_node_named(model, "Mesh")
+	if mesh_node == null:
+		model.queue_free()
+		return false
+	for part_name in ["Mesh", "Leg0", "Leg1", "HeadMarker"]:
+		var part := _find_node_named(model, part_name)
+		if part != null:
+			part.get_parent().remove_child(part)
+			add_child(part)
+	model.queue_free()
+	for leg_name in ["Leg0", "Leg1"]:
+		var leg := get_node_or_null(leg_name)
+		if leg != null and leg is Node3D:
+			_legs.append(leg)
+	var hm := get_node_or_null("HeadMarker")
+	if hm != null and hm is Node3D:
+		_build_googly_eyes(hm, 0.115)
+	_apply_color()
+
+	var col := CollisionShape3D.new()
+	var shape := CapsuleShape3D.new()
+	shape.radius = 0.3
+	shape.height = 1.75
+	col.shape = shape
+	col.position = Vector3(0, 0.9, 0)
+	add_child(col)
+	return true
+
+func _build_fallback_capsule() -> void:
+	var body := MeshInstance3D.new()
+	body.name = "Mesh"
+	var cap := CapsuleMesh.new()
+	cap.radius = 0.35
+	cap.height = 1.6
+	body.mesh = cap
+	body.position = Vector3(0, 0.9, 0)
+	body.material_override = MatCache.flat(color)
+	add_child(body)
+	_build_googly_eyes(body, 0.35, 0.55)   # no separate head sphere — bias up toward the capsule top
+
+	var col := CollisionShape3D.new()
+	var shape := CapsuleShape3D.new()
+	shape.radius = 0.35
+	shape.height = 1.7
+	col.shape = shape
+	col.position = Vector3(0, 0.9, 0)
+	add_child(col)
+
 func set_champion(on: bool) -> void:
 	_champion = on
 	if _crown:
@@ -392,6 +558,24 @@ func _apply_color() -> void:
 	var mi := get_node_or_null("Mesh") as MeshInstance3D
 	if mi:
 		mi.material_override = MatCache.flat(color)
+	# real model's legs are separate MeshInstance3D objects -- recolor them
+	# too so the whole body reads as one uniformly-tinted person (mirrors
+	# tribemember.gd's _apply_tint()).
+	for leg in _legs:
+		if leg is MeshInstance3D:
+			(leg as MeshInstance3D).material_override = MatCache.flat(color)
+
+## Recursive child-name search (same helper animal.gd already has its own
+## copy of) -- pulls the real "Mesh"/"Leg0"/"Leg1"/"HeadMarker" parts out from
+## wherever glTF nested them inside the imported scene.
+func _find_node_named(root: Node, part_name: String) -> Node:
+	if root.name == part_name:
+		return root
+	for c in root.get_children():
+		var found := _find_node_named(c, part_name)
+		if found != null:
+			return found
+	return null
 
 func _physics_process(delta: float) -> void:
 	# MID tier used to skip whole physics_process calls and replay them with
@@ -426,13 +610,46 @@ func _physics_process(delta: float) -> void:
 
 # bob/breathe; wariness rises from the SeeDanger neuron, posture sinks with hunger
 func _animate_body(delta: float) -> void:
+	var spd := Vector2(velocity.x, velocity.z).length()
+	# Kenney/Quaternius model: a REAL rig with its own baked walk/idle clips
+	# -- play those instead of BodyAnim's procedural bob. Quaternius checked
+	# first since it's the higher-priority tier (see _build()); only one of
+	# the two is ever non-null on a given NPC.
+	var real_anim: AnimationPlayer = _quaternius_anim if _quaternius_anim != null else _kenney_anim
+	if real_anim != null:
+		var clip := "walk" if spd > 0.3 else "idle"
+		if real_anim.has_animation(clip) and real_anim.current_animation != clip:
+			real_anim.play(clip)
+		return
 	if anim == null:
 		return
-	var spd := Vector2(velocity.x, velocity.z).length()
 	var fear := brain.get_potential("SeeDanger") / 50.0
 	anim.tension = clampf(maxf(anim.tension - delta * 1.2, fear), 0.0, 1.0)
 	anim.mood = -clampf(_hunger / 120.0, 0.0, 1.0) * 0.6
 	anim.tick(delta, spd, is_on_floor())
+	_animate_legs(delta, spd)
+
+## Real per-leg walk cycle for the biped model -- identical technique to
+## tribemember.gd's own copy. No-op on the old capsule fallback (_legs empty).
+const LEG_SWING_MAX := 0.5
+const LEG_SWING_REF_SPEED := 2.0
+
+## AXIS FIX (2026-07-27): "legs go sideways not forward/backward" -- see
+## animal.gd's own copy of this fix for the full explanation. Rotating LOCAL
+## Z (not X) swings the foot fore-and-aft after the Blender->glTF Y-up export
+## remaps axes.
+func _animate_legs(delta: float, speed: float) -> void:
+	if _legs.size() < 2:
+		return
+	var move := clampf(speed / LEG_SWING_REF_SPEED, 0.0, 1.0)
+	if move < 0.03:
+		for l in _legs:
+			(l as Node3D).rotation.z = move_toward((l as Node3D).rotation.z, 0.0, delta * 6.0)
+		return
+	_leg_phase += delta * (5.0 + speed * 2.0)
+	var swing := LEG_SWING_MAX * move
+	(_legs[0] as Node3D).rotation.z = sin(_leg_phase) * swing
+	(_legs[1] as Node3D).rotation.z = sin(_leg_phase + PI) * swing
 
 func _check_stuck(delta: float) -> void:
 	_stuck_cd -= delta
@@ -594,7 +811,91 @@ func _brain_tick() -> void:
 		_flee_from = _player
 		if anim: anim.pop(0.6)       # spooked — a quick startle
 
+## TURTLE-ISLAND AWARENESS (2026-07-27): see tribemember.gd's own copy of
+## this same fix for the full reasoning (including two bugs found via a live
+## debug-teleport test: running the AI alongside the swim produces a stable
+## orbit, and swimming via move_and_slide() orbits too since the disc's
+## collision is a solid cylinder whose SIDE a horizontal swim collides with
+## and slides along, rather than crossing -- fixed by skipping the normal AI
+## entirely while swimming, and using a direct position write that climbs
+## toward the deck's height instead of move_and_slide()). `tribe` is already
+## this NPC's home turtle directly when it has one; neutrals (tribe == null)
+## fall back to whichever turtle they're actually nearest, resolved once and
+## cached (a per-frame scan across every world tribe would be a real cost at
+## Massive scale's 1000-tribe count).
+## BUG FIX (2026-07-27): "still trees and npcs not stuck to island" -- this
+## was a DIFFERENT bug than the swim-recovery above. `home` (the wander
+## anchor / territory-defense reference point) is a plain Vector3, set ONCE
+## in setup() from the tribe's position AT SPAWN TIME, then never touched
+## again. As the tribe's turtle drifted, `home` stayed frozen at the old
+## spot -- NPCs kept wandering/defending relative to an increasingly stale
+## point, actively walking AWAY from the actual (correctly parented, silently
+## drifting) camp rather than failing to follow it. Refreshed from the
+## tribe's LIVE position every frame, before anything downstream reads it.
 func _move(delta: float) -> void:
+	if tribe != null and is_instance_valid(tribe):
+		home = tribe.global_position
+		if building:
+			_build_target = tribe.global_position + _build_offset
+	if _turtle_swim_recovery(delta):
+		return
+	_move_impl(delta)
+
+const TURTLE_SWIM_SPEED := 3.5
+var _cached_home_turtle = null
+
+func _resolve_home_turtle():
+	if tribe != null:
+		return tribe
+	if _cached_home_turtle != null and is_instance_valid(_cached_home_turtle):
+		return _cached_home_turtle
+	var mgr = get_tree().get_first_node_in_group("tribe_manager")
+	if mgr == null:
+		return null
+	var best = null
+	var best_d := INF
+	var home = mgr.get("player_island")
+	if home != null and is_instance_valid(home):
+		best_d = Vector2(global_position.x - home.global_position.x, global_position.z - home.global_position.z).length()
+		best = home
+	if "world_tribes" in mgr:
+		for wt in mgr.world_tribes:
+			if wt == null or not is_instance_valid(wt):
+				continue
+			var d := Vector2(global_position.x - wt.global_position.x, global_position.z - wt.global_position.z).length()
+			if d < best_d:
+				best_d = d
+				best = wt
+	_cached_home_turtle = best
+	return best
+
+func _turtle_swim_recovery(delta: float) -> bool:
+	var mgr = get_tree().get_first_node_in_group("tribe_manager")
+	if mgr == null or not bool(mgr.get("turtle_islands")):
+		return false
+	var home_turtle = _resolve_home_turtle()
+	if home_turtle == null or not is_instance_valid(home_turtle):
+		return false
+	var r: float = float(home_turtle.get("turtle_radius"))
+	if r <= 0.0:
+		return false
+	var away: Vector3 = global_position - home_turtle.global_position
+	away.y = 0.0
+	var d := away.length()
+	if d <= r - 2.0:
+		return false   # safely on the disc -- normal AI movement applies
+	var dir: Vector3 = -away.normalized() if d > 0.01 else Vector3.FORWARD
+	global_position.x += dir.x * TURTLE_SWIM_SPEED * delta
+	global_position.z += dir.z * TURTLE_SWIM_SPEED * delta
+	# BUG FIX (2026-07-28): stop duplicating TURTLE_FREEBOARD as a local
+	# constant -- it drifted out of sync the moment the real one
+	# (turtle_island.gd) got retuned. Ask the turtle itself instead.
+	var deck_y: float = home_turtle.global_position.y + float(home_turtle.deck_height()) + 0.5
+	global_position.y = move_toward(global_position.y, deck_y, 2.5 * delta)
+	velocity = Vector3.ZERO
+	return true
+
+func _move_impl(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= gravity * delta
 	else:

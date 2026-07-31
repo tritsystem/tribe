@@ -1,4 +1,4 @@
-extends Node3D
+extends "res://turtle_island.gd"
 # ─────────────────────────────────────────────────────────────────────────────
 # WorldTribe — one of the AI clans that populate the world. Owns a roster of
 # npc.gd members, a totem (the rally point attackers walk up to and swing at),
@@ -62,6 +62,32 @@ const _DEFAULT_GEAR_BIAS := {"weapon": 0.5, "armor": 0.5}
 func material_name() -> String:
 	return str(TribeRegistry.get_archetype(archetype).get("material", "Stone"))
 
+## The island's 3 named resources (turtle-island revamp) -- pure display/flavor
+## layer on top of the existing single-currency economy: material_name()/
+## material_stock stay the ONE thing that's actually forged, traded, and
+## looted (unchanged -- that machinery is wired through MATERIAL_GEAR, gear
+## tiers, capture_state/apply_state, looting, castle cost, dozens of call
+## sites). Rewiring all of that into a real multi-stock economy is out of
+## scope for what the .tribe data + trade UI need: a rival island just needs
+## to SHOW an abundance of 3 named resources (always including food) when the
+## player looks at it. Read from the .tribe file's `resources:` line (parsed
+## for free by tribe_dsl.gd's existing comma-list handling); guarantees a
+## food-ish entry even if a file's data is missing or malformed.
+func island_resources() -> Array:
+	var res: Array = TribeRegistry.get_archetype(archetype).get("resources", [])
+	if res.is_empty():
+		res = [material_name(), "Food", "Wood"]
+	else:
+		res = res.duplicate()
+	var has_food := false
+	for r in res:
+		if str(r).to_lower().contains("food") or str(r).to_lower() in ["fish", "meat", "berries", "milk", "grain", "bread", "roots"]:
+			has_food = true
+			break
+	if not has_food:
+		res.append("Food")
+	return res
+
 # the line this tribe's leader greets you with, based on player_opinion —
 # pulled from the archetype's .tribe file (speech: hostile/neutral/friendly/
 # trusted/bonded). Falls back gracefully if a tier isn't defined for it.
@@ -85,7 +111,7 @@ var abandoned: bool = false
 
 var member_count: int = 0
 var member_cap: int = 16
-var territory_radius: float = 16.0
+var territory_radius: float = 48.0   # 3x (was 16.0) -- scales turtle_radius, fences, courtyard, and wander range together
 var color: Color = Color(0.7, 0.2, 0.2)
 var npcs: Array = []
 var deaths: int = 0
@@ -137,7 +163,9 @@ var _leader_accum: float = 0.0
 var _growth_accum: float = 0.0
 
 var _totem_label: Label3D = null
-var manager = null   # the player's TribeManager, for raid resolution callbacks
+# `manager` (the player's TribeManager, for raid resolution callbacks) is now
+# inherited from turtle_island.gd -- it needed the same var for its own
+# turtle-body/collision logic, so this is the one shared declaration.
 var _stockpile_pile: MeshInstance3D = null
 var _stockpile_clubs: MeshInstance3D = null
 
@@ -199,6 +227,206 @@ var player_opinion: float = 0.0  # -1 hostile .. +1 friendly, ripples from other
 const MURDER_OPINION_HIT := 0.30
 const MURDER_RIVALRY_HIT := 0.35
 
+# ── TURTLE ISLANDS — this tribe's camp rides a giant moving turtle instead of
+# sitting on fixed land. Set by Tribemanager._spawn_world_tribes() BEFORE
+# setup() runs (so _level_camp_ground() below can see it and skip the
+# flatten/ground-snap that only makes sense for static land camps). Since
+# every teepee/fence/block/NPC is already add_child()'d onto this node (see
+# the class comment for damage_camp's conquest note, and _build()/_make_npc()
+# below), moving THIS node's global_position each tick moves the whole camp
+# for free -- no new "carry the camp" architecture needed, just drift logic.
+#
+# is_turtle/drift_heading/steerable/turtle_radius and all the drift/collision
+# constants now live in turtle_island.gd (this class's base) -- extracted
+# 2026-07-27 so the turtle body/drift/collision-stick logic only needs fixing
+# once, shared with player_island.gd. Phase 4 still sets `steerable = true`
+# once turtle_trust earns it, exactly as before -- that's an external
+# assignment onto the inherited var, no different from before.
+
+# ── TROLL-GUARDED ISLANDS (Phase 6) — some islands are set up (by whoever
+# spawns this tribe, see Tribemanager._spawn_world_tribes()) with a troll.gd
+# guardian blocking the approach. While unbeaten, docking/trading/questing
+# stay off -- see troll_blocks_access() below, checked by trade_partners()
+# and the Phase 5 encounter prompt (Tribemanager.gd) and by current_quest()
+# above (Phase 3). Walking/standing on the island itself is NOT blocked (the
+# turtle-weld/is_on_turtle() checks are untouched) -- only the diplomatic and
+# quest-y systems that would make an unbeaten guardian pointless.
+var has_troll: bool = false
+var troll_defeated: bool = false
+
+func troll_blocks_access() -> bool:
+	return has_troll and not troll_defeated
+
+# ── TURTLE TRUST + QUESTS (Phase 3) — a SEPARATE scalar from player_opinion
+# (general diplomatic warmth, still gates hostility/trading elsewhere).
+# turtle_trust is specifically "have you done this turtle's quests" and is
+# what unlocks steering (Phase 4). Reuses the exact rank-gate idiom
+# tribemember.gd already uses for its per-NPC rank system (HysteresisGate per
+# tier, last-attained-gate-wins) -- see _ensure_turtle_trust_gates() -- but as
+# ONE scalar for the whole island, since a turtle is a single entity, not a
+# roster of individually-ranked members.
+const HysteresisGateScript = preload("res://hysteresis_gate.gd")
+var turtle_trust: float = 0.0   # 0..1
+var completed_quests: Dictionary = {}   # tier name -> Array[String] of finished quest names (no repeats)
+const TURTLE_TRUST_TIER_ORDER := ["friendly", "trusted", "bonded"]
+const TURTLE_TRUST_CUTOFFS := {"friendly": 0.30, "trusted": 0.60, "bonded": 0.85}
+const TURTLE_TRUST_HYSTERESIS_MARGIN := 0.85   # mirrors tribemember.gd's RANK_HYSTERESIS_MARGIN
+var _turtle_trust_gates: Dictionary = {}   # tier name -> HysteresisGate, built lazily
+const QUEST_INTERACT_RANGE := 22.0   # generous -- "near the island/totem", not one NPC's tight interact_range
+
+func _ensure_turtle_trust_gates() -> void:
+	if not _turtle_trust_gates.is_empty():
+		return
+	for tier_name in TURTLE_TRUST_TIER_ORDER:
+		var cutoff: float = float(TURTLE_TRUST_CUTOFFS[tier_name])
+		_turtle_trust_gates[tier_name] = HysteresisGateScript.new(cutoff * TURTLE_TRUST_HYSTERESIS_MARGIN, cutoff)
+
+## Highest trust tier the player has actually reached with this island ("" if
+## none yet). Ascending tier order, last-attained-gate-wins -- identical shape
+## to tribemember.gd's rank recompute.
+func turtle_trust_tier() -> String:
+	_ensure_turtle_trust_gates()
+	var tier := ""
+	for tier_name in TURTLE_TRUST_TIER_ORDER:
+		var attained: bool = (_turtle_trust_gates[tier_name] as HysteresisGate).update(turtle_trust)
+		if attained:
+			tier = tier_name
+	return tier
+
+## A quest name is classified into one of 3 completion buckets by keyword
+## rather than hand-coding each of the ~24 unique quest strings across all 12
+## archetypes individually -- kept deliberately simple, matching this
+## project's existing tolerance for abstraction elsewhere (e.g. AI wars
+## falling back to a dice roll when no real war party musters).
+const QUEST_KEYWORDS_ESCORT := ["escort", "caravan", "guide"]
+const QUEST_KEYWORDS_WAR := ["war", "raid", "duel", "assassination", "capture"]
+
+func _quest_type(q: String) -> String:
+	var ql := q.to_lower()
+	for k in QUEST_KEYWORDS_ESCORT:
+		if ql.contains(k):
+			return "escort"
+	for k in QUEST_KEYWORDS_WAR:
+		if ql.contains(k):
+			return "war"
+	return "gather"   # gather/hunt/scout and every other flavor quest (clear pests, recover stray, sacred rite, ...)
+
+## The quest the player is currently working TOWARD (i.e. the tier ABOVE
+## whatever's already attained -- you complete a tier's quest to REACH it, you
+## don't get offered it after). "" once bonded (nothing left to offer) or if
+## this isn't a turtle tribe at all.
+func current_quest() -> String:
+	if not is_turtle or troll_blocks_access():
+		return ""
+	var attained := turtle_trust_tier()
+	var next_idx: int = TURTLE_TRUST_TIER_ORDER.find(attained) + 1
+	if next_idx >= TURTLE_TRUST_TIER_ORDER.size():
+		return ""
+	var working_tier: String = TURTLE_TRUST_TIER_ORDER[next_idx]
+	var quests: Dictionary = TribeRegistry.get_archetype(archetype).get("quests", {})
+	var list = quests.get(working_tier, [])
+	if typeof(list) == TYPE_STRING:
+		list = [list]
+	var done: Array = completed_quests.get(working_tier, [])
+	for q in list:
+		if not (String(q) in done):
+			return String(q)
+	return ""
+
+## Complete the current quest IF it belongs to `kind` ("gather"/"escort"/
+## "war") -- called from Tribemanager's real completion hooks: a gather/hunt/
+## scout-type quest via the player's E-interact tribute at the totem (see
+## _turtle_quest_tick below), an escort-type quest via a successful player
+## trade envoy delivery (_resolve_player_envoy), a war-type quest via a won
+## player raid (_raid_tick). Bumps trust enough to GUARANTEE the working
+## tier's gate crosses -- one quest done is enough to earn that tier's trust,
+## rather than requiring every quest an archetype happens to list.
+func try_complete_quest_of_type(kind: String) -> bool:
+	if not is_turtle:
+		return false
+	var attained := turtle_trust_tier()
+	var next_idx: int = TURTLE_TRUST_TIER_ORDER.find(attained) + 1
+	if next_idx >= TURTLE_TRUST_TIER_ORDER.size():
+		return false
+	var working_tier: String = TURTLE_TRUST_TIER_ORDER[next_idx]
+	var q := current_quest()
+	if q == "" or _quest_type(q) != kind:
+		return false
+	if not completed_quests.has(working_tier):
+		completed_quests[working_tier] = []
+	completed_quests[working_tier].append(q)
+	var cutoff: float = float(TURTLE_TRUST_CUTOFFS[working_tier])
+	turtle_trust = clampf(maxf(turtle_trust, cutoff + 0.05), 0.0, 1.0)
+	# Phase 4: reaching "trusted" (or beyond) is what unlocks steering rights
+	# on THIS island -- checked live off turtle_trust_tier() rather than just
+	# "working_tier == trusted", so bonded (which is also >= trusted) unlocks
+	# it too even if a save somehow skipped straight there.
+	var tier_now := turtle_trust_tier()
+	if tier_now == "trusted" or tier_now == "bonded":
+		steerable = true
+	if manager != null and manager.has_method("notify_cat"):
+		manager.notify_cat("tribes", "🐢 The %s now see you as %s — quest complete: %s" % [
+			tribe_name, working_tier, q])
+	return true
+
+var _quest_prompt_shown: String = ""   # last quest text already announced, so it doesn't spam every tick
+var _e_was_down_quest: bool = false
+
+## Player-facing half of the loop: proximity announces the current quest once
+## (same throttled-notify idiom as Tribemanager._check_proximity_discovery),
+## and E turns in a gather/hunt/scout-type quest for a real cost paid from the
+## player's own stores (mirrors tribemember.gd's E-to-contribute idiom, just
+## scoped to "near this island's totem" instead of "near one NPC"). Escort/war
+## quests are NOT turned in here -- they complete automatically via the real
+## systems they name (see try_complete_quest_of_type's callers).
+func _turtle_quest_tick(_delta: float) -> void:
+	if not is_turtle or defeated or manager == null:
+		return
+	var p = manager.get_tree().get_first_node_in_group("player")
+	if p == null or not is_instance_valid(p):
+		return
+	var in_range: bool = global_position.distance_to((p as Node3D).global_position) <= QUEST_INTERACT_RANGE
+	var q := current_quest()
+	if not in_range or q == "":
+		return
+	if q != _quest_prompt_shown:
+		_quest_prompt_shown = q
+		if manager.has_method("notify_cat"):
+			manager.notify_cat("tribes", "🐢 The %s ask a favor: \"%s\"" % [tribe_name, q])
+	var e_down := Input.is_key_pressed(KEY_E)
+	var e_just := e_down and not _e_was_down_quest
+	_e_was_down_quest = e_down
+	if e_just and _quest_type(q) == "gather":
+		_try_pay_quest_tribute()
+
+const QUEST_TRIBUTE_COST := 5   # spent from the PLAYER's own food/wood/materials -- whichever they can afford
+
+func _try_pay_quest_tribute() -> void:
+	if manager == null:
+		return
+	if manager.has_method("spend_food") and manager.spend_food(QUEST_TRIBUTE_COST):
+		try_complete_quest_of_type("gather")
+	elif int(manager.get("wood")) >= QUEST_TRIBUTE_COST:
+		manager.set("wood", int(manager.get("wood")) - QUEST_TRIBUTE_COST)
+		try_complete_quest_of_type("gather")
+	elif int(manager.get("materials")) >= QUEST_TRIBUTE_COST:
+		manager.set("materials", int(manager.get("materials")) - QUEST_TRIBUTE_COST)
+		try_complete_quest_of_type("gather")
+	elif manager.has_method("notify_cat"):
+		manager.notify_cat("tribes", "🐢 The %s need more than you're carrying (%d food/wood/materials)." % [tribe_name, QUEST_TRIBUTE_COST])
+
+## is_on_turtle()/_turtle_tick()/_clamp_to_map()/the collision-stick block
+## (_stuck_to/_check_hard_collision/_begin_stick/_release_stick) all now live
+## in turtle_island.gd (this class's base) -- extracted 2026-07-27, identical
+## behavior, see that file for the full history of bugs each of these fixed.
+
+## _build_turtle_body()/_try_real_turtle_shell()/_find_mesh_child() all now
+## live in turtle_island.gd (this class's base) -- extracted 2026-07-27. The
+## `turtle_radius = territory_radius * 1.4` computation that used to be
+## _build_turtle_body()'s own first line is tribe-specific (player_island.gd
+## just sets a fixed 45.0), so it moved into setup() below, right before the
+## (inherited) _build_turtle_body() call.
+
 func setup(nm: String, col: Color, arch: String, p_size: int, mgr) -> void:
 	tribe_name = nm
 	color = col
@@ -233,6 +461,9 @@ func setup(nm: String, col: Color, arch: String, p_size: int, mgr) -> void:
 	# stockpile (visible from a distance as "a tribe exists here") still
 	# builds immediately above; only the individual walking-around members
 	# and the tree grove wait.
+	if is_turtle:
+		turtle_radius = territory_radius * 1.4   # covers the camp footprint + the resource grove (spawns to 1.15x)
+		_build_turtle_body()
 	_refresh_label()
 	_level_camp_ground()
 
@@ -242,7 +473,13 @@ func setup(nm: String, col: Color, arch: String, p_size: int, mgr) -> void:
 ## the whole footprint is one height, the existing offset maths is correct. A
 ## camp built on flat ground -- which is what a camp IS -- rather than draped over
 ## a hillside. No-op with no terrain.
+##
+## Turtle tribes skip this entirely: they float at the water's surface (the y
+## already set by Tribemanager._find_turtle_spot() before setup() ran), not on
+## flattened ground -- there's no terrain to flatten under a moving island.
 func _level_camp_ground() -> void:
+	if is_turtle:
+		return
 	if manager == null or not manager.has_method("ground_y"):
 		return
 	var t = manager.get("terrain")
@@ -295,11 +532,21 @@ func _spawn_resource_grove() -> void:
 	for i in range(count):
 		var ang := randf() * TAU
 		var r := territory_radius * randf_range(0.75, 1.15)
-		var pos := _seat(global_position + Vector3(cos(ang) * r, 0.0, sin(ang) * r))
 		var t = StaticBody3D.new()
 		t.set_script(load("res://tree.gd"))
-		get_parent().add_child(t)
-		t.global_position = pos
+		if is_turtle:
+			# added to self (not get_parent()) so the grove travels with the
+			# island -- for a static land camp, trees deliberately stay put
+			# even if the camp were ever moved (see get_parent() below).
+			add_child(t)
+			# BUG FIX (2026-07-28): local Y=0.0 planted grove trees inside the
+			# shell's own solid collision once TURTLE_FREEBOARD was raised --
+			# see _make_npc()'s identical fix above.
+			t.position = Vector3(cos(ang) * r, deck_height(), sin(ang) * r)
+		else:
+			var pos := _seat(global_position + Vector3(cos(ang) * r, 0.0, sin(ang) * r))
+			get_parent().add_child(t)
+			t.global_position = pos
 
 # keeps a spawned-in camp from sitting next to a picked-clean wasteland —
 # the global ecology tick (Tribemanager._ecology_tick) replenishes resources
@@ -331,8 +578,12 @@ func _tick_local_resources(delta: float) -> void:
 	if near_trees < LOCAL_RESOURCE_MIN:
 		var tr = StaticBody3D.new()
 		tr.set_script(load("res://tree.gd"))
-		get_parent().add_child(tr)
-		tr.global_position = _seat(_local_resource_spot(radius))
+		if is_turtle:
+			add_child(tr)
+			tr.position = _local_resource_local_offset(radius)
+		else:
+			get_parent().add_child(tr)
+			tr.global_position = _seat(_local_resource_spot(radius))
 
 	var near_food := 0
 	for f in get_tree().get_nodes_in_group("food_source"):
@@ -344,9 +595,19 @@ func _tick_local_resources(delta: float) -> void:
 	if near_food < LOCAL_RESOURCE_MIN:
 		var b = Node3D.new()
 		b.set_script(load("res://food_source.gd"))
-		get_parent().add_child(b)
-		b.global_position = _local_resource_spot(radius)
+		if is_turtle:
+			add_child(b)
+			b.position = _local_resource_local_offset(radius)
+		else:
+			get_parent().add_child(b)
+			b.global_position = _local_resource_spot(radius)
 
+	# BUG FIX (2026-07-27): "animals aren't stuck to the islands" -- this used
+	# to always call manager._spawn_animal(pos) with a WORLD position and no
+	# turtle to parent onto, so every animal became a sibling of the
+	# Tribemanager with no island transform to inherit. Now matches the
+	# tree/food_source pattern above: turtle tribes pass `self` plus a LOCAL
+	# offset so the animal rides along for free.
 	var near_animals := 0
 	for a in get_tree().get_nodes_in_group("animal"):
 		var an := a as Node3D
@@ -355,7 +616,26 @@ func _tick_local_resources(delta: float) -> void:
 			if near_animals >= LOCAL_RESOURCE_MIN:
 				break
 	if near_animals < LOCAL_RESOURCE_MIN and manager and manager.has_method("_spawn_animal"):
-		manager._spawn_animal(_local_resource_spot(radius))
+		if is_turtle:
+			manager._spawn_animal(_local_resource_local_offset(radius), self)
+		else:
+			manager._spawn_animal(_local_resource_spot(radius))
+
+	# GAP FIX (2026-07-28): "put all resources on every shell" -- minerals had
+	# no spawn path at all in turtle mode (see turtle_island.gd's
+	# spawn_local_mineral() for why). Only meaningful on a turtle (a static
+	# land camp already sits over real quarry-able terrain via the ambient
+	# scatter).
+	if is_turtle:
+		var near_minerals := 0
+		for mn in get_tree().get_nodes_in_group("mineral"):
+			var mnn := mn as Node3D
+			if mnn and is_instance_valid(mnn) and global_position.distance_to(mnn.global_position) <= radius:
+				near_minerals += 1
+				if near_minerals >= LOCAL_RESOURCE_MIN:
+					break
+		if near_minerals < LOCAL_RESOURCE_MIN:
+			spawn_local_mineral(radius)
 
 func _local_resource_spot(radius: float) -> Vector3:
 	var ang := randf() * TAU
@@ -363,6 +643,18 @@ func _local_resource_spot(radius: float) -> Vector3:
 	# seat on the surface at the spot's own x,z, not the camp's height -- keeps
 	# camp-fed bushes/animals on the ground on sloping terrain
 	return _seat(global_position + Vector3(cos(ang) * r, 0.0, sin(ang) * r))
+
+## Turtle equivalent of _local_resource_spot(): a LOCAL (parent-relative)
+## offset, not a world position -- turtle-attached props are add_child()'d
+## onto this node and positioned in local space so they inherit drift for
+## free, same as the grove trees in _spawn_resource_grove().
+func _local_resource_local_offset(radius: float) -> Vector3:
+	var ang := randf() * TAU
+	var r := radius * randf_range(0.5, 0.95)
+	# BUG FIX (2026-07-28): local Y=0.0 planted these inside the shell's own
+	# solid collision once TURTLE_FREEBOARD was raised -- see _make_npc()'s
+	# identical fix.
+	return Vector3(cos(ang) * r, deck_height(), sin(ang) * r)
 
 # periodically forge a gear upgrade when we have material to spare. Picks the
 # weapon or armor track the tribe's material culture favors (the one furthest
@@ -471,6 +763,13 @@ func _decay_opinions(delta: float) -> void:
 		bonds[k] = move_toward(float(bonds[k]), 0.0, bond_rate * delta)
 
 func _build() -> void:
+	# BUG FIX (2026-07-28): every child below assumed local Y=0 was already
+	# the standing surface -- true back when TURTLE_FREEBOARD was 1.2, wrong
+	# now that it's 4.0 (the whole camp -- totem, campfire, stockpile -- was
+	# sitting inside the shell's own solid collision instead of on top of it).
+	# See world_tribe.gd's _make_npc() for the same fix on NPCs.
+	var deck_y: float = deck_height() if is_turtle else 0.0
+
 	# the totem: a banner the whole camp rallies behind
 	var pole := MeshInstance3D.new()
 	var pm := CylinderMesh.new()
@@ -478,7 +777,7 @@ func _build() -> void:
 	pm.bottom_radius = 0.1
 	pm.height = 3.2
 	pole.mesh = pm
-	pole.position = Vector3(0, 1.6, 0)
+	pole.position = Vector3(0, 1.6 + deck_y, 0)
 	pole.material_override = MatCache.flat(Color(0.4, 0.3, 0.2))
 	add_child(pole)
 
@@ -486,7 +785,7 @@ func _build() -> void:
 	var bm := BoxMesh.new()
 	bm.size = Vector3(1.4, 1.0, 0.06)
 	banner.mesh = bm
-	banner.position = Vector3(0, 2.6, 0)
+	banner.position = Vector3(0, 2.6 + deck_y, 0)
 	banner.material_override = MatCache.flat(color)
 	add_child(banner)
 
@@ -495,7 +794,7 @@ func _build() -> void:
 	shape.radius = 0.4
 	shape.height = 3.2
 	col.shape = shape
-	col.position = Vector3(0, 1.6, 0)
+	col.position = Vector3(0, 1.6 + deck_y, 0)
 	var body := StaticBody3D.new()
 	body.add_child(col)
 	body.add_to_group("camp_core")
@@ -503,7 +802,7 @@ func _build() -> void:
 	add_child(body)
 
 	_totem_label = Label3D.new()
-	_totem_label.position = Vector3(0, 4.0, 0)
+	_totem_label.position = Vector3(0, 4.0 + deck_y, 0)
 	_totem_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	_totem_label.font_size = 32
 	add_child(_totem_label)
@@ -513,18 +812,18 @@ func _build() -> void:
 	var fire := StaticBody3D.new()
 	fire.set_script(load("res://campfire.gd"))
 	add_child(fire)
-	fire.position = Vector3(2.5, 0.0, 2.5)
+	fire.position = Vector3(2.5, deck_y, 2.5)
 
-	_build_stockpile()
+	_build_stockpile(deck_y)
 
 # every camp has its own supply pile, just like the player's — visible proof
 # the tribe's food/clubs are real, physical things sitting in the world
-func _build_stockpile() -> void:
+func _build_stockpile(deck_y: float = 0.0) -> void:
 	var base := MeshInstance3D.new()
 	var bm := BoxMesh.new()
 	bm.size = Vector3(2.4, 0.25, 2.4)
 	base.mesh = bm
-	base.position = Vector3(2.8, 0.125, 0)
+	base.position = Vector3(2.8, 0.125 + deck_y, 0)
 	base.material_override = MatCache.flat(Color(0.40, 0.28, 0.16))
 	add_child(base)
 
@@ -532,7 +831,7 @@ func _build_stockpile() -> void:
 	var pm := BoxMesh.new()
 	pm.size = Vector3(1.6, 0.8, 1.6)
 	_stockpile_pile.mesh = pm
-	_stockpile_pile.position = Vector3(2.8, 0.65, 0)
+	_stockpile_pile.position = Vector3(2.8, 0.65 + deck_y, 0)
 	_stockpile_pile.material_override = MatCache.flat(Color(0.85, 0.7, 0.35))
 	add_child(_stockpile_pile)
 
@@ -540,7 +839,7 @@ func _build_stockpile() -> void:
 	var cm := BoxMesh.new()
 	cm.size = Vector3(0.22, 0.22, 1.0)
 	_stockpile_clubs.mesh = cm
-	_stockpile_clubs.position = Vector3(3.7, 0.5, 0)
+	_stockpile_clubs.position = Vector3(3.7, 0.5 + deck_y, 0)
 	_stockpile_clubs.material_override = MatCache.flat(Color(0.45, 0.30, 0.15))
 	add_child(_stockpile_clubs)
 
@@ -567,7 +866,13 @@ func _make_npc() -> Node:
 	add_child(n)
 	var ang := randf() * TAU
 	var r := randf() * territory_radius * 0.22   # central courtyard, clear of huts
-	n.position = Vector3(cos(ang) * r, 1.0, sin(ang) * r)
+	# BUG FIX (2026-07-28): a flat local Y=1.0 assumed the shell surface sits
+	# right near this node's own origin -- true back when TURTLE_FREEBOARD was
+	# 1.2, wrong now that it's 4.0 (NPCs spawned inside the shell's own solid
+	# collision instead of standing on it). deck_height() is a no-op elsewhere
+	# for a non-turtle static camp.
+	var y := deck_height() if is_turtle else 1.0
+	n.position = Vector3(cos(ang) * r, y, sin(ang) * r)
 	n.setup(self, global_position, territory_radius, color)
 	if n.has_method("set_gear"):
 		n.set_gear(weapon_level, armor_level)   # arm them to the tribe's current tech
@@ -970,6 +1275,8 @@ func _process(delta: float) -> void:
 	_tick_local_resources(delta)
 	_craft_gear_tick(delta)
 	_decay_opinions(delta)
+	_turtle_tick(delta)
+	_turtle_quest_tick(delta)
 
 	if member_count <= 0 and npcs.is_empty():
 		abandoned = true
@@ -1194,7 +1501,10 @@ func _raise_forge() -> void:
 	var forge := StaticBody3D.new()
 	forge.set_script(load("res://blacksmith_forge.gd"))
 	add_child(forge)
-	forge.position = Vector3(6.0, 0.0, -6.0)   # just clear of the castle keep footprint
+	# just clear of the castle keep footprint; deck_height() keeps it on the
+	# shell's actual surface instead of inside its collision (see _build()'s
+	# identical fix)
+	forge.position = Vector3(6.0, deck_height() if is_turtle else 0.0, -6.0)
 
 func _build_castle(delta: float) -> void:
 	if _castle_plan.is_empty():

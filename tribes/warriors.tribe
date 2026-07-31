@@ -1,5 +1,6 @@
 archetype: Warriors
 material: Obsidian
+resources: Grain, Obsidian, Iron
 
 traits:
   aggression: 0.2

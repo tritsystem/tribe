@@ -1,5 +1,6 @@
 archetype: Foragers
 material: Bone
+resources: Berries, Bone, Herbs
 
 traits:
   aggression: -0.1

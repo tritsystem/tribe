@@ -131,8 +131,20 @@ func abort() -> void:
 		_place_at(mover.global_position)
 	state = OFF
 
+## REAL ASSET (2026-07-27): Kenney Watercraft Kit's boat-row-small.glb (CC0,
+## downloaded not generated) instead of a bare brown box. Textured (shares
+## assets/watercraft/Textures/colormap.png), used AS-IS -- no
+## material_override, that would wipe the baked texture. Falls back to the
+## old box hull if the asset is missing.
 func _build_boat() -> Node3D:
 	var boat := Node3D.new()
+	var glb_path := "res://assets/watercraft/boat-row-small.glb"
+	if ResourceLoader.exists(glb_path):
+		var packed: PackedScene = load(glb_path)
+		var model := packed.instantiate()
+		model.scale = Vector3(1.45, 1.45, 1.45)   # measured ~2.37m long -- scaled to the old hull's ~3.4m length
+		boat.add_child(model)
+		return boat
 	var hull := MeshInstance3D.new()
 	var bm := BoxMesh.new()
 	bm.size = Vector3(2.2, 0.35, 3.4)

@@ -1,5 +1,6 @@
 archetype: Herders
 material: Bone
+resources: Milk, Bone, Wool
 
 traits:
   aggression: -0.15

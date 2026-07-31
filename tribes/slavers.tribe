@@ -1,5 +1,6 @@
 archetype: Slavers
 material: Obsidian
+resources: Grain, Obsidian, Chains
 
 traits:
   aggression: 0.15

@@ -14,19 +14,32 @@ var _flicker_t := 0.0
 var _flame: MeshInstance3D
 var _light: OmniLight3D
 
+const CAMPFIRE_GLB := "res://assets/survival/campfire-pit.glb"
+# real model measured at 0.277769m diameter; scaled to match this game's
+# existing ~1.7m stone-ring diameter (outer_radius 0.85 * 2).
+const CAMPFIRE_SCALE := 1.7 / 0.277769
+
 func _ready() -> void:
 	add_to_group("campfire")
 	_build_visual()
 
+## REAL ASSET (2026-07-27): Kenney Survival Kit's campfire-pit.glb (CC0,
+## downloaded not generated) for the stone ring + logs, in place of the old
+## TorusMesh ring. Textured, used AS-IS -- no material_override (would wipe
+## the baked texture). The real model has no flame of its own, so the
+## procedural flame cone + flicker light stay exactly as they were, just
+## seated on the real pit now instead of a bare ring. Falls back to the old
+## TorusMesh ring if the asset is missing.
 func _build_visual() -> void:
-	var ring := MeshInstance3D.new()
-	var torus := TorusMesh.new()
-	torus.inner_radius = 0.6; torus.outer_radius = 0.85
-	ring.mesh = torus
-	ring.position = Vector3(0, 0.1, 0)
-	ring.rotation_degrees = Vector3(90, 0, 0)
-	ring.material_override = MatCache.flat(Color(0.35, 0.30, 0.28), 0.9, 0.0)
-	add_child(ring)
+	if not _try_real_pit():
+		var ring := MeshInstance3D.new()
+		var torus := TorusMesh.new()
+		torus.inner_radius = 0.6; torus.outer_radius = 0.85
+		ring.mesh = torus
+		ring.position = Vector3(0, 0.1, 0)
+		ring.rotation_degrees = Vector3(90, 0, 0)
+		ring.material_override = MatCache.flat(Color(0.35, 0.30, 0.28), 0.9, 0.0)
+		add_child(ring)
 
 	_flame = MeshInstance3D.new()
 	var cone := CylinderMesh.new()
@@ -54,6 +67,15 @@ func _build_visual() -> void:
 	col.shape = shape
 	col.position = Vector3(0, 0.15, 0)
 	add_child(col)
+
+func _try_real_pit() -> bool:
+	if not ResourceLoader.exists(CAMPFIRE_GLB):
+		return false
+	var packed: PackedScene = load(CAMPFIRE_GLB)
+	var model := packed.instantiate()
+	model.scale = Vector3(CAMPFIRE_SCALE, CAMPFIRE_SCALE, CAMPFIRE_SCALE)
+	add_child(model)
+	return true
 
 func _process(delta: float) -> void:
 	# a gentle flicker -- cheap (one sine, no per-frame allocation), but

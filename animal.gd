@@ -49,6 +49,17 @@ const SPECIES := {
 	"Bear":    {"color": Color(0.30, 0.22, 0.16), "scale": 1.6,  "wander": 1.1, "flee": 1.3, "sense": 5.5, "food": 4, "skins": 2, "threat_w": 50},
 }
 
+## REAL ASSET SWAP (2026-07-28): "still need better animal skins" -- the
+## gen_animals.py primitives (flat baked color, no fur/skin texture) are
+## being replaced species-by-species with real downloaded CC0/CC-BY models
+## (Quaternius's animated pack + a molochdadev/Poly-by-Google bundle, both via
+## poly.pizza). No free, no-login model was found for Hare specifically, so it
+## reuses Rabbit's real mesh -- the two read as near-identical animals anyway,
+## and Hare keeps its own distinct stats/brain via SPECIES above regardless of
+## which model renders it. Boar has no real model yet either; it stays on
+## _build_fallback() below until one is sourced.
+const ASSET_ALIAS := {"Hare": "Rabbit"}
+
 var gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity", 9.8)
 var home_pos: Vector3 = Vector3.ZERO
 var _wander_target: Vector3 = Vector3.ZERO
@@ -107,9 +118,17 @@ func _brain_text(sp: Dictionary) -> String:
 ## just attached to a real "HeadMarker" empty the model leaves at the
 ## snout instead of to a bare sphere. Falls back to the old primitive body
 ## if the asset is somehow missing, so a missing file never breaks the game.
+## A "scale=1.0" creature should end up roughly this tall (shoulder height,
+## in metres) -- calibrated to the old gen_animals.py rig's own native size
+## at scale=1.0 (its Deer, leg_len+body_h, comes out to ~0.94), so real
+## downloaded models normalize to about the same footprint the old primitives
+## already played at.
+const ANIMAL_REF_HEIGHT := 1.0
+
 func _build(sp: Dictionary) -> void:
 	var s := float(sp["scale"])
-	var glb_path := "res://assets/animals/%s.glb" % species.to_lower()
+	var asset_species: String = ASSET_ALIAS.get(species, species)
+	var glb_path := "res://assets/animals/%s.glb" % asset_species.to_lower()
 	var packed: PackedScene = load(glb_path) if ResourceLoader.exists(glb_path) else null
 	if packed == null:
 		_build_fallback(sp)
@@ -117,12 +136,34 @@ func _build(sp: Dictionary) -> void:
 
 	var model := packed.instantiate()
 	model.name = "Mesh"
-	model.scale = Vector3(s, s, s)
 	add_child(model)
 
+	# SCALE NORMALIZATION (2026-07-28): "rabbits and bears are HUGE and
+	# misshapen" -- `s` (SPECIES[x]["scale"]) was tuned against the old
+	# gen_animals.py rig's own native size, where a bare `Vector3(s,s,s)`
+	# happened to come out right. A downloaded real-world model (Quaternius /
+	# Poly-by-Google) has its OWN native export scale, completely unrelated to
+	# that assumption -- multiplying by `s` directly could be wildly wrong in
+	# either direction. Measuring the model's actual mesh bounds and solving
+	# for the scale that lands it at the species' intended height (same
+	# `ANIMAL_REF_HEIGHT * s` target every species already implies) works
+	# regardless of what units the source file was exported in.
+	var native_height := _mesh_height(model)
+	var vscale: float = s
+	if native_height > 0.01:
+		vscale = (ANIMAL_REF_HEIGHT * s) / native_height
+	model.scale = Vector3(vscale, vscale, vscale)
+
+	# HeadMarker only exists on the old gen_animals.py rig -- a downloaded
+	# real-world model (Quaternius/Poly-by-Google) already has its own
+	# sculpted face, so only bolt on the cartoon googly eyes when that marker
+	# is actually present (i.e. still the old primitive-derived rig).
 	var marker := _find_node_named(model, "HeadMarker")
-	_head = (marker as Node3D) if marker != null else model
-	_build_googly_eyes(_head, 0.22 * s)
+	if marker != null:
+		_head = marker as Node3D
+		_build_googly_eyes(_head, 0.22 * vscale)
+	else:
+		_head = model
 
 	# REAL LEG ANIMATION (2026-07-19): "can we give animations" -- the model
 	# carries 4 separate leg objects (Leg0..Leg3, each pivoting at its own
@@ -137,18 +178,38 @@ func _build(sp: Dictionary) -> void:
 
 	var label := Label3D.new()
 	label.text = species
-	label.position = Vector3(0, 1.8 * s, 0)
+	label.position = Vector3(0, 1.8 * vscale, 0)
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	label.modulate = Color(0.9, 0.85, 0.7)
 	add_child(label)
 
 	var col := CollisionShape3D.new()
 	var shape := CapsuleShape3D.new()
-	shape.radius = 0.4 * s
-	shape.height = 1.4 * s
+	shape.radius = 0.4 * vscale
+	shape.height = 1.4 * vscale
 	col.shape = shape
-	col.position = Vector3(0, 0.7 * s, 0)
+	col.position = Vector3(0, 0.7 * vscale, 0)
 	add_child(col)
+
+## Measures `root`'s combined mesh bounds (all VisualInstance3D descendants,
+## however deep -- Quaternius's animated models carry a skeleton in between)
+## and returns the height (Y extent), in root's OWN local space so it's
+## independent of wherever root has actually been parented/positioned.
+## Requires root to already be inside the tree (global_transform valid).
+func _mesh_height(root: Node3D) -> float:
+	var combined := AABB()
+	var found := false
+	var stack: Array = [root]
+	while not stack.is_empty():
+		var n = stack.pop_back()
+		if n is VisualInstance3D:
+			var world_aabb: AABB = (n as VisualInstance3D).global_transform * (n as VisualInstance3D).get_aabb()
+			var local_aabb: AABB = root.global_transform.affine_inverse() * world_aabb
+			combined = local_aabb if not found else combined.merge(local_aabb)
+			found = true
+		for c in n.get_children():
+			stack.append(c)
+	return combined.size.y if found else 0.0
 
 func _find_node_named(root: Node, name: String) -> Node:
 	if root.name == name:
@@ -325,20 +386,30 @@ func _animate_body(delta: float) -> void:
 const LEG_SWING_MAX := 0.55         # radians at a full stride
 const LEG_SWING_REF_SPEED := 2.6    # speed that reads as a full walk
 
+## AXIS FIX (2026-07-27): "legs go sideways not forward/backward" -- these
+## legs were rotating on LOCAL X, which swings the foot between "hanging
+## down" and "out to the side". The Blender->glTF Y-up export swaps Blender's
+## authoring axes (spine/length along Blender X, side-to-side on Blender Y,
+## up on Blender Z) onto Godot's (X stays X, Blender Z -> Godot Y, Blender Y
+## -> Godot Z) -- see gen_animals.py's own axis-fix comment on HeadMarker,
+## which hit the exact same remap for a different node. Rotating LOCAL Z
+## (which mixes X="forward/back" and Y="hanging down") is what actually
+## swings the foot fore-and-aft; LOCAL X was mixing Y and Z, i.e. down and
+## sideways.
 func _animate_legs(delta: float, speed: float) -> void:
 	if _legs.size() < 4:
 		return
 	var move := clampf(speed / LEG_SWING_REF_SPEED, 0.0, 1.0)
 	if move < 0.03:
 		for l in _legs:
-			(l as Node3D).rotation.x = move_toward((l as Node3D).rotation.x, 0.0, delta * 6.0)
+			(l as Node3D).rotation.z = move_toward((l as Node3D).rotation.z, 0.0, delta * 6.0)
 		return
 	_leg_phase += delta * (5.0 + speed * 2.5)
 	var swing := LEG_SWING_MAX * move
-	(_legs[0] as Node3D).rotation.x = sin(_leg_phase) * swing          # front-left
-	(_legs[3] as Node3D).rotation.x = sin(_leg_phase) * swing          # back-right
-	(_legs[1] as Node3D).rotation.x = sin(_leg_phase + PI) * swing     # front-right
-	(_legs[2] as Node3D).rotation.x = sin(_leg_phase + PI) * swing     # back-left
+	(_legs[0] as Node3D).rotation.z = sin(_leg_phase) * swing          # front-left
+	(_legs[3] as Node3D).rotation.z = sin(_leg_phase) * swing          # back-right
+	(_legs[1] as Node3D).rotation.z = sin(_leg_phase + PI) * swing     # front-right
+	(_legs[2] as Node3D).rotation.z = sin(_leg_phase + PI) * swing     # back-left
 
 # ── one spiking tick: feed senses in, read drives out ──
 var _threat_scan_cd: float = 0.0
@@ -382,7 +453,74 @@ func _nearest_threat() -> Node3D:
 					best = n
 	return best
 
+## TURTLE-ISLAND AWARENESS (2026-07-27): see tribemember.gd's own copy of this
+## fix for the full reasoning (including two bugs found via a live
+## debug-teleport test: running the AI alongside the swim produces a stable
+## orbit, and swimming via move_and_slide() orbits too since the disc's
+## collision is a solid cylinder whose SIDE a horizontal swim collides with
+## and slides along rather than crossing -- fixed by skipping the normal AI
+## entirely while swimming, and using a direct position write that climbs
+## toward the deck's height instead of move_and_slide()). Animals have no
+## owning tribe, so their home turtle is resolved once (nearest to home_pos,
+## the land-gated spawn anchor) and cached -- not rescanned every frame.
 func _move(delta: float) -> void:
+	if _turtle_swim_recovery(delta):
+		return
+	_move_impl(delta)
+
+const TURTLE_SWIM_SPEED := 3.5
+var _cached_home_turtle = null
+
+func _resolve_home_turtle():
+	if _cached_home_turtle != null and is_instance_valid(_cached_home_turtle):
+		return _cached_home_turtle
+	var mgr = get_tree().get_first_node_in_group("tribe_manager")
+	if mgr == null:
+		return null
+	var best = null
+	var best_d := INF
+	var home = mgr.get("player_island")
+	if home != null and is_instance_valid(home):
+		best_d = Vector2(home_pos.x - home.global_position.x, home_pos.z - home.global_position.z).length()
+		best = home
+	if "world_tribes" in mgr:
+		for wt in mgr.world_tribes:
+			if wt == null or not is_instance_valid(wt):
+				continue
+			var d := Vector2(home_pos.x - wt.global_position.x, home_pos.z - wt.global_position.z).length()
+			if d < best_d:
+				best_d = d
+				best = wt
+	_cached_home_turtle = best
+	return best
+
+func _turtle_swim_recovery(delta: float) -> bool:
+	var mgr = get_tree().get_first_node_in_group("tribe_manager")
+	if mgr == null or not bool(mgr.get("turtle_islands")):
+		return false
+	var home_turtle = _resolve_home_turtle()
+	if home_turtle == null or not is_instance_valid(home_turtle):
+		return false
+	var r: float = float(home_turtle.get("turtle_radius"))
+	if r <= 0.0:
+		return false
+	var away: Vector3 = global_position - home_turtle.global_position
+	away.y = 0.0
+	var d := away.length()
+	if d <= r - 2.0:
+		return false   # safely on the disc -- normal AI movement applies
+	var dir: Vector3 = -away.normalized() if d > 0.01 else Vector3.FORWARD
+	global_position.x += dir.x * TURTLE_SWIM_SPEED * delta
+	global_position.z += dir.z * TURTLE_SWIM_SPEED * delta
+	# BUG FIX (2026-07-28): stop duplicating TURTLE_FREEBOARD as a local
+	# constant -- it drifted out of sync the moment the real one
+	# (turtle_island.gd) got retuned. Ask the turtle itself instead.
+	var deck_y: float = home_turtle.global_position.y + float(home_turtle.deck_height()) + 0.5
+	global_position.y = move_toward(global_position.y, deck_y, 2.5 * delta)
+	velocity = Vector3.ZERO
+	return true
+
+func _move_impl(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= gravity * delta
 	else:
@@ -434,8 +572,22 @@ func _wander(delta: float) -> void:
 		# but a wander step could wade into the ocean where they'd walk the
 		# seafloor. On island maps, reject a watery target and just stay put by
 		# home this cycle -- animals graze the land, they don't swim.
+		# BUG FIX (2026-07-27): in turtle_islands mode the underlying terrain is
+		# PURE ocean everywhere (see terrain_gen.gd's all_ocean) -- this check
+		# used to ask the STATIC TERRAIN "is this water?", which is
+		# unconditionally true both off a turtle's disc AND on it (turtles
+		# aren't part of the terrain heightmap), so it rejected nothing useful.
+		# Ask the home TURTLE instead: still inside its disc, or not.
 		var mgr = get_tree().get_first_node_in_group("tribe_manager")
-		if mgr != null and mgr.has_method("terrain_is_water") and mgr.terrain_is_water(_wander_target.x, _wander_target.z):
+		var still_on_turtle := true
+		if mgr != null and bool(mgr.get("turtle_islands")):
+			var home_turtle = _resolve_home_turtle()
+			still_on_turtle = home_turtle != null and is_instance_valid(home_turtle) \
+				and home_turtle.has_method("is_on_turtle") \
+				and home_turtle.is_on_turtle(_wander_target.x, _wander_target.z)
+		elif mgr != null and mgr.has_method("terrain_is_water") and mgr.terrain_is_water(_wander_target.x, _wander_target.z):
+			still_on_turtle = false
+		if not still_on_turtle:
 			_wander_target = home_pos
 		_wander_pause = randf_range(0.8, 2.5)
 		_halt()

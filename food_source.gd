@@ -47,27 +47,52 @@ func _ready() -> void:
 func _register_with_grid() -> void:
 	SpatialGrid.update(self)
 
+## REAL ASSET (2026-07-27): Kenney Nature Kit's plant_bush.glb (CC0, downloaded
+## not generated) for the base foliage. Kept as a separate node from `_berries`
+## rather than a full swap -- the ripeness/harvest-progress feedback (scale +
+## color lerp in _refresh()) is a real gameplay signal with no real-asset
+## equivalent (Kenney doesn't ship a bush that changes color as you pick it),
+## so that small sphere stays as a functional accent riding on top of the real
+## bush, same tradeoff already used for the turtle's legs/stockpile's scaling.
+const BUSH_GLB := "res://assets/nature/plant_bush.glb"
+const BUSH_MEASURED_RADIUS := 0.198
+const BUSH_TARGET_RADIUS := 0.85
+
 func _build() -> void:
-	var base := MeshInstance3D.new()
-	var cyl := CylinderMesh.new()
-	cyl.top_radius = 0.7
-	cyl.bottom_radius = 0.85
-	cyl.height = 0.4
-	base.mesh = cyl
-	base.position = Vector3(0, 0.2, 0)
-	base.material_override = MatCache.flat(Color(0.35, 0.25, 0.15))
-	add_child(base)
+	if not _try_real_bush():
+		var base := MeshInstance3D.new()
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = 0.7
+		cyl.bottom_radius = 0.85
+		cyl.height = 0.4
+		base.mesh = cyl
+		base.position = Vector3(0, 0.2, 0)
+		base.material_override = MatCache.flat(Color(0.35, 0.25, 0.15))
+		add_child(base)
 
 	_berries = MeshInstance3D.new()
 	var sph := SphereMesh.new()
-	sph.radius = 0.6
-	sph.height = 1.2
+	sph.radius = 0.35
+	sph.height = 0.7
 	_berries.mesh = sph
-	_berries.position = Vector3(0, 0.95, 0)
+	_berries.position = Vector3(0, 0.75, 0)
 	var gmat := StandardMaterial3D.new()
 	gmat.albedo_color = Color(0.25, 0.6, 0.2)
 	_berries.material_override = gmat
 	add_child(_berries)
+
+func _try_real_bush() -> bool:
+	if not ResourceLoader.exists(BUSH_GLB):
+		return false
+	var packed: PackedScene = load(BUSH_GLB)
+	var inst := packed.instantiate()
+	if not (inst is Node3D):
+		inst.queue_free()
+		return false
+	var s: float = BUSH_TARGET_RADIUS / BUSH_MEASURED_RADIUS
+	(inst as Node3D).scale = Vector3(s, s, s)
+	add_child(inst)
+	return true
 
 	_label = Label3D.new()
 	_label.position = Vector3(0, 2.0, 0)

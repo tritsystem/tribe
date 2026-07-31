@@ -193,6 +193,18 @@ func _build_row(p: Dictionary) -> Control:
 	detail_lbl.add_theme_font_size_override("font_size", 12)
 	name_col.add_child(detail_lbl)
 
+	# turtle-island revamp: the island's full 3-resource abundance (always
+	# incl. food) as flavor text -- the tradeable amount above still runs on
+	# the one real currency (material_name()/material_stock), this line just
+	# shows what the island HAS.
+	var resources: Array = p.get("resources", [])
+	if not resources.is_empty():
+		var res_lbl := Label.new()
+		res_lbl.text = "Island produces: %s" % ", ".join(resources.map(func(r): return str(r)))
+		res_lbl.add_theme_color_override("font_color", UITheme.TEXT_MUTED)
+		res_lbl.add_theme_font_size_override("font_size", 11)
+		name_col.add_child(res_lbl)
+
 	var opinion: float = float(p.get("player_opinion", 0.0))
 	var stance_text: String = "friendly" if opinion > 0.15 else ("wary" if opinion > -0.3 else "hostile")
 	hb.add_child(UITheme.pill(stance_text, UITheme.sentiment_color(opinion)))

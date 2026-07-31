@@ -1,5 +1,6 @@
 archetype: Mystics
 material: Glass
+resources: Mushrooms, Glass, Incense
 
 traits:
   aggression: -0.15

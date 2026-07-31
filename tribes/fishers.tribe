@@ -1,5 +1,6 @@
 archetype: Fishers
 material: Bronze
+resources: Fish, Bronze, Salt
 
 traits:
   aggression: -0.1

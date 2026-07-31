@@ -35,9 +35,17 @@ func _ready() -> void:
 	var after_teepees: Array = get_tree().get_nodes_in_group("teepee")
 	_check("founding the outpost raises real teepees near it",
 		after_teepees.size() == 2 or after_teepees.size() == 3)
+	# PRE-EXISTING TEST BUG (found + fixed 2026-07-28, unrelated to tonight's
+	# turtle-island work): a full 3D distance_to() here also counts the
+	# teepee's height above ground_y() -- in this isolated test (no real
+	# terrain, no turtle built), ground_y()'s "nothing built yet" fallback is
+	# a nonzero 10.0, which alone exceeds the old 10.0 threshold regardless of
+	# how close the teepee actually is in XZ. HORIZONTAL distance only, same
+	# reasoning tribemember.gd's own build-plan navigation already uses.
 	for t in after_teepees:
+		var flat := Vector2((t as Node3D).global_position.x - 200.0, (t as Node3D).global_position.z - 0.0)
 		_check("each teepee is actually placed near the outpost, not at the origin",
-			(t as Node3D).global_position.distance_to(Vector3(200, 0, 0)) < 10.0)
+			flat.length() < 10.0)
 
 	# CRITICAL: these teepees must NOT be swept up by fortress-ring cleanup --
 	# they belong to a separate settlement, not the home ring.

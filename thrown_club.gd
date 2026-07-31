@@ -18,10 +18,20 @@ func _ready() -> void:
 	body_entered.connect(_on_body_entered)
 
 	var mesh := MeshInstance3D.new()
-	var m := BoxMesh.new()
-	m.size = Vector3(0.08, 0.08, 0.7)
-	mesh.mesh = m
-	mesh.material_override = MatCache.flat(Color(0.45, 0.30, 0.15))
+	# REAL ASSET (2026-07-27): joe345's Dagger.glb (itch.io, CC0) -- same
+	# asset FPSPlayer.gd's viewmodel and tribemember.gd's tier-0 use, so the
+	# thrown projectile matches what was actually thrown. material_override
+	# stays null (real mesh, textureless-but-multi-material -- see
+	# tribemember.gd's own note on why these aren't recolored).
+	var real_dagger := _get_real_dagger_mesh()
+	if real_dagger != null:
+		mesh.mesh = real_dagger
+		mesh.scale = Vector3(2.5, 2.5, 2.5)   # measured height 0.312 -- matches tribemember.gd's tier-0 sizing
+	else:
+		var m := BoxMesh.new()
+		m.size = Vector3(0.08, 0.08, 0.7)
+		mesh.mesh = m
+		mesh.material_override = MatCache.flat(Color(0.45, 0.30, 0.15))
 	add_child(mesh)
 
 	var col := CollisionShape3D.new()
@@ -29,6 +39,33 @@ func _ready() -> void:
 	shape.size = Vector3(0.12, 0.12, 0.7)
 	col.shape = shape
 	add_child(col)
+
+static var _real_dagger_mesh: Mesh = null   # cached so repeated throws don't re-load the file
+
+static func _get_real_dagger_mesh() -> Mesh:
+	if _real_dagger_mesh != null:
+		return _real_dagger_mesh
+	var glb_path := "res://assets/weapons/Dagger.glb"
+	if not ResourceLoader.exists(glb_path):
+		return null
+	var packed: PackedScene = load(glb_path)
+	var inst := packed.instantiate()
+	var found := _find_dagger_mesh(inst)
+	if found == null:
+		inst.queue_free()
+		return null
+	_real_dagger_mesh = found.mesh
+	inst.queue_free()
+	return _real_dagger_mesh
+
+static func _find_dagger_mesh(root_node: Node) -> MeshInstance3D:
+	if root_node is MeshInstance3D and root_node.name == "Dagger":
+		return root_node as MeshInstance3D
+	for c in root_node.get_children():
+		var f := _find_dagger_mesh(c)
+		if f != null:
+			return f
+	return null
 
 func launch(from: Vector3, dir: Vector3, speed: float, dmg: float, who) -> void:
 	global_position = from
@@ -67,6 +104,13 @@ func _on_body_entered(body: Node) -> void:
 			thrower.screen_shake(0.035)
 		if mgr and mgr.has_method("notify"):
 			mgr.notify("Your thrown club strikes %s! They will not forget this." % str(body.get("member_name")))
+		queue_free()
+	elif body.is_in_group("troll") and body.has_method("take_hit"):
+		body.take_hit(damage, thrower)
+		if thrower and thrower.has_method("screen_shake"):
+			thrower.screen_shake(0.045)
+		if mgr and mgr.has_method("notify"):
+			mgr.notify("Your thrown club strikes the troll!")
 		queue_free()
 	elif body.is_in_group("animal") and body.has_method("killed"):
 		var loot: Dictionary = body.killed()

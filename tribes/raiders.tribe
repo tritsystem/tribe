@@ -1,5 +1,6 @@
 archetype: Raiders
 material: Obsidian
+resources: Salted Meat, Obsidian, Plunder
 
 traits:
   aggression: 0.25

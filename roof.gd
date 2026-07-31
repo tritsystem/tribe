@@ -31,23 +31,29 @@ func _ready() -> void:
 	_build()
 
 func _build() -> void:
-	# A pyramid via a 4-sided CylinderMesh (top_radius 0). Rotated 45° so its
-	# four faces align to the square footprint's edges rather than its corners.
-	var mi := MeshInstance3D.new()
-	var pm := CylinderMesh.new()
-	pm.top_radius = 0.0
-	# corner-reach: a 4-gon inscribed in this radius has its flat sides at
-	# radius/sqrt(2); we want the sides to reach the footprint edge, so scale up.
-	pm.bottom_radius = footprint * 0.5 * sqrt(2.0)
-	pm.height = roof_height
-	pm.radial_segments = 4
-	mi.mesh = pm
-	mi.rotation.y = PI * 0.25
-	# CylinderMesh is centred on its origin; lift so the pyramid BASE sits at
-	# local y=0 (i.e. exactly on top of the wall the caller placed us at).
-	mi.position.y = roof_height * 0.5
-	mi.material_override = MatCache.flat(tint, 0.9, 0.0)
-	add_child(mi)
+	# REAL ASSET (2026-07-27): Kenney Survival Kit's structure-roof.glb (CC0,
+	# downloaded not generated), textured, scaled non-uniformly to fit
+	# whatever footprint/roof_height this instance was placed with -- same
+	# "scale a real mesh to a variable footprint" trick already used for the
+	# turtle shell and the boat hull. No material_override (the asset is
+	# textured, and overriding would flatten its baked look) -- the `tint`
+	# per-tribe color variation only applies to the old primitive fallback.
+	if not _try_real_roof():
+		var mi := MeshInstance3D.new()
+		var pm := CylinderMesh.new()
+		pm.top_radius = 0.0
+		# corner-reach: a 4-gon inscribed in this radius has its flat sides at
+		# radius/sqrt(2); we want the sides to reach the footprint edge, so scale up.
+		pm.bottom_radius = footprint * 0.5 * sqrt(2.0)
+		pm.height = roof_height
+		pm.radial_segments = 4
+		mi.mesh = pm
+		mi.rotation.y = PI * 0.25
+		# CylinderMesh is centred on its origin; lift so the pyramid BASE sits at
+		# local y=0 (i.e. exactly on top of the wall the caller placed us at).
+		mi.position.y = roof_height * 0.5
+		mi.material_override = MatCache.flat(tint, 0.9, 0.0)
+		add_child(mi)
 
 	var col := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
@@ -55,6 +61,26 @@ func _build() -> void:
 	col.shape = shape
 	col.position = Vector3(0, roof_height * 0.5, 0)
 	add_child(col)
+
+## Real Kenney roof piece, measured local AABB roughly 0.5 x 0.657 x 0.5 (the
+## main slab; a small "Group" trim child hangs slightly below, kept as-is).
+## Scaled non-uniformly so footprint/height match exactly whatever this
+## instance was placed with, same math as world_tribe.gd's turtle shell.
+const ROOF_GLB := "res://assets/survival/structure-roof.glb"
+const ROOF_MEASURED_XZ := 0.5
+const ROOF_MEASURED_Y := 0.657183
+
+func _try_real_roof() -> bool:
+	if not ResourceLoader.exists(ROOF_GLB):
+		return false
+	var packed: PackedScene = load(ROOF_GLB)
+	var inst := packed.instantiate()
+	if not (inst is Node3D):
+		inst.queue_free()
+		return false
+	(inst as Node3D).scale = Vector3(footprint / ROOF_MEASURED_XZ, roof_height / ROOF_MEASURED_Y, footprint / ROOF_MEASURED_XZ)
+	add_child(inst)
+	return true
 
 # Cosmetic-structural: conquest routes through teepees + stockpile only, so a
 # roof simply absorbs and ignores blows rather than gating defeat.

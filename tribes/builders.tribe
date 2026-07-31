@@ -1,5 +1,6 @@
 archetype: Builders
 material: Glass
+resources: Bread, Glass, Timber
 
 traits:
   aggression: -0.1

@@ -57,6 +57,26 @@ var owner_tribe = null   # set when a rival WorldTribe places this (cleanup book
 
 static var _mesh_cache: Dictionary = {}   # Kind -> Mesh
 static var _mat_cache: Dictionary = {}    # Kind -> StandardMaterial3D
+static var _real_mesh_cache: Dictionary = {}   # Kind -> Mesh, or `false` if tried and unavailable
+
+## REAL ASSETS (2026-07-27): Kenney Survival Kit pieces reused for DOOR/ROOF/
+## SMALL -- CC0, downloaded not generated. No real stair piece exists in this
+## kit (or any downloaded so far), so STAIR stays the procedural PrismMesh
+## wedge. structure-roof.glb is the SAME asset roof.gd uses for a whole
+## island building's pyramid cap, reused here at grid-tile scale for one
+## build_piece -- same "one real asset, several contexts" pattern already
+## used for the Dagger across tribemember.gd/FPSPlayer.gd/thrown_club.gd.
+const KIND_REAL_GLB := {
+	Kind.DOOR:  "res://assets/survival/structure-metal-doorway.glb",
+	Kind.ROOF:  "res://assets/survival/structure-roof.glb",
+	Kind.SMALL: "res://assets/survival/structure.glb",
+}
+# measured local AABB size per real piece (X, Y, Z)
+const KIND_REAL_MEASURED := {
+	Kind.DOOR:  Vector3(0.53543, 0.5, 0.088905),
+	Kind.ROOF:  Vector3(0.5, 0.657183, 0.5),
+	Kind.SMALL: Vector3(0.5, 0.5, 0.5),
+}
 
 func _ready() -> void:
 	add_to_group("build_piece")
@@ -71,15 +91,62 @@ func _ready() -> void:
 
 func _build() -> void:
 	var mesh := MeshInstance3D.new()
-	mesh.mesh = _get_mesh(kind)
-	mesh.material_override = _get_mat(kind)
-	if kind == Kind.ROOF:
-		mesh.rotation.x = PI   # point the ridge upward instead of down into the ground
+	var real_mesh: Mesh = _get_real_mesh(kind)
+	if real_mesh != null:
+		mesh.mesh = real_mesh
+		var measured: Vector3 = KIND_REAL_MEASURED.get(kind, Vector3.ONE)
+		var target: Vector3 = _target_size(kind)
+		mesh.scale = Vector3(target.x / measured.x, target.y / measured.y, target.z / measured.z)
+		# no material_override -- all three of these are textured
+	else:
+		mesh.mesh = _get_mesh(kind)
+		mesh.material_override = _get_mat(kind)
+		if kind == Kind.ROOF:
+			mesh.rotation.x = PI   # point the ridge upward instead of down into the ground
 	add_child(mesh)
 
 	var col := CollisionShape3D.new()
 	col.shape = _get_shape(kind)
 	add_child(col)
+
+## The real asset's TARGET world size per kind -- matches whatever the old
+## procedural mesh measured for that kind, so swapping to a real asset never
+## changes a piece's footprint/collision fit.
+static func _target_size(k: Kind) -> Vector3:
+	match k:
+		Kind.DOOR:  return Vector3(FULL_SIZE * 0.7, FULL_SIZE * 1.4, 0.2)
+		Kind.ROOF:  return Vector3(FULL_SIZE * 1.15, FULL_SIZE * 1.2, FULL_SIZE * 0.97)
+		Kind.SMALL: return Vector3(SMALL_SIZE, SMALL_SIZE, SMALL_SIZE) * 0.97
+		_: return Vector3.ONE
+
+static func _get_real_mesh(k: Kind) -> Mesh:
+	if _real_mesh_cache.has(k):
+		var cached = _real_mesh_cache[k]
+		return cached if cached is Mesh else null
+	var path: String = str(KIND_REAL_GLB.get(k, ""))
+	if path == "" or not ResourceLoader.exists(path):
+		_real_mesh_cache[k] = false
+		return null
+	var packed: PackedScene = load(path)
+	var inst := packed.instantiate()
+	var found := _find_mesh_recursive(inst)
+	if found == null:
+		inst.queue_free()
+		_real_mesh_cache[k] = false
+		return null
+	var m: Mesh = found.mesh
+	inst.queue_free()
+	_real_mesh_cache[k] = m
+	return m
+
+static func _find_mesh_recursive(root_node: Node) -> MeshInstance3D:
+	if root_node is MeshInstance3D:
+		return root_node as MeshInstance3D
+	for c in root_node.get_children():
+		var f := _find_mesh_recursive(c)
+		if f != null:
+			return f
+	return null
 
 static func _get_mesh(k: Kind) -> Mesh:
 	if _mesh_cache.has(k):

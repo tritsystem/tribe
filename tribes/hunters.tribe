@@ -1,5 +1,6 @@
 archetype: Hunters
 material: Bone
+resources: Meat, Bone, Hides
 
 traits:
   aggression: 0.1

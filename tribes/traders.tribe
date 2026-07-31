@@ -1,5 +1,6 @@
 archetype: Traders
 material: Bronze
+resources: Bread, Bronze, Spices
 
 traits:
   aggression: -0.2

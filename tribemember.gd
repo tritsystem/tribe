@@ -29,6 +29,8 @@ const HysteresisGateScript = preload("res://hysteresis_gate.gd")
 # ── brain / trust state ──
 var brain: Spikeling
 var anim: BodyAnim                       # procedural "alive" body motion
+var _legs: Array = []                    # Leg0/Leg1 (real model only) -- see _animate_legs()
+var _leg_phase: float = 0.0
 var manager                              # TribeManager — set by the manager
 var player_in_range: bool = false
 var trust_display: float = 0.0           # 0..1 for the bar (smoothed)
@@ -61,15 +63,21 @@ const FACTION_VOUCH_RATE   := 0.06  # bond nudged upward per second by faction-m
 const WORK_REL_GAIN        := 0.2   # bond gained for completing a voluntary (unpaid) task
 const STARVE_DECAY_RATE    := 0.06  # bond eroded per second while the tribe is starving
 const DEFECT_THRESHOLD     := 0.7   # starving backers leave when bond drops below this
-const TRUST_BAR_SCALE      := 2.20  # relationship value that fills the trust bar to 100% (equals Devoted threshold)
+const TRUST_BAR_SCALE      := 3.40  # relationship value that fills the trust bar to 100% (equals Soulbound threshold)
 
 # ── rank thresholds (relationship value needed to reach each rank) ──
+# SOULBOUND (2026-07-28): added as the ceiling above Devoted -- the "mentally
+# linked, see through their eyes" tier. Gap from Devoted (1.20) is the widest
+# yet, following the existing widening-gap pattern (0.30/0.40/0.60/0.90) --
+# this is meant to be rare, a capstone bond, not something most of a roster
+# reaches in one playthrough.
 const RANKS := [
 	["Stranger",     0.00],
 	["Acquaintance", 0.30],
 	["Friend",       0.70],
 	["Loyal",        1.30],
-	["Devoted",      2.20],   # must equal TRUST_BAR_SCALE
+	["Devoted",      2.20],
+	["Soulbound",    3.40],   # must equal TRUST_BAR_SCALE
 ]
 
 # RANK HYSTERESIS (2026-07-19): "does it save tokens" -> "what's the best use
@@ -98,7 +106,7 @@ func _ensure_rank_gates() -> void:
 
 # ── loyalty score each rank contributes toward accepting a risky order ──
 const RANK_LOYALTY := {
-	"Stranger": 15, "Acquaintance": 45, "Friend": 75, "Loyal": 100, "Devoted": 125,
+	"Stranger": 15, "Acquaintance": 45, "Friend": 75, "Loyal": 100, "Devoted": 125, "Soulbound": 160,
 }
 
 # ── order acceptance: drive = ORDER_BASE + rank_loyalty + courage; must beat ORDER_RISK ──
@@ -260,6 +268,7 @@ const RANK_COLORS := {
 	"Friend":       Color(0.35, 0.90, 0.40),
 	"Loyal":        Color(0.40, 0.65, 1.00),
 	"Devoted":      Color(1.00, 0.80, 0.20),
+	"Soulbound":    Color(0.65, 0.30, 0.90),
 }
 var is_busy: bool = false
 var _task_kind: String = ""
@@ -948,12 +957,18 @@ func _ready() -> void:
 	add_to_group("tribe")
 	add_to_group("has_brain")
 	_setup_slope_walking()
+	_maybe_upgrade_to_real_model()
 	brain = Spikeling.new()
 	if not brain.load_from_text(_brain_text()):
 		push_error("TribeMember: brain failed to load")
 	home_pos = global_position
 	_target = home_pos
 	_fidget_cd = randf_range(4.0, 14.0)   # stagger so members don't all fidget simultaneously
+	# real model only -- the old capsule fallback has no separate leg objects
+	for leg_name in ["Leg0", "Leg1"]:
+		var leg := get_node_or_null(leg_name)
+		if leg != null and leg is Node3D:
+			_legs.append(leg)
 	_apply_tint()
 	# faction-mark floating orbs were removed — too many same-ish colored dots
 	# bobbing over members' heads read as visual noise rather than useful
@@ -988,6 +1003,183 @@ func _setup_slope_walking() -> void:
 	floor_stop_on_slope = true
 	floor_constant_speed = true
 
+## REAL MODELED ASSETS: a tribemember can come from any of 3 different
+## construction sites -- Tribemanager._build_member_in_code()'s plain
+## capsule, the empty tribemember.tscn via member_scene, or a hand-placed
+## scene node (main.tscn's "TribeManager/TribeMember", the very FIRST
+## companion every game starts with, with its own baked CapsuleMesh). Rather
+## than fix all 3 separately and risk them drifting out of sync, the real-
+## model swap happens ONCE, here, on every tribemember regardless of origin.
+##
+## Three tiers, best first: Quaternius's CC0 "Universal Base Characters" +
+## "Universal Animation Library" (a genuinely higher-fidelity rig/mesh than
+## Kenney's blocky look -- see the QUATERNIUS_CHARACTERS block below for the
+## full story), else Kenney's CC0 "Mini Characters" (real rig + real baked
+## walk/idle animations -- assets/humans_real/, downloaded, not generated) if
+## present, else the Blender-generated body (tools/gen_humans.py) as a
+## fallback, else the old capsule stays untouched.
+const KENNEY_CHARACTERS := [
+	"character-male-a", "character-male-b", "character-male-c",
+	"character-male-d", "character-male-e", "character-male-f",
+	"character-female-a", "character-female-b", "character-female-c",
+	"character-female-d", "character-female-e", "character-female-f",
+]
+# Kenney's "Mini" characters ship at a stylized ~0.67m-tall scale -- this
+# game's existing humans (capsule collision height ~1.6-2.0m) are full adult
+# scale, so scale up to match everything else (camera height, club reach,
+# interact ranges) instead of everyone suddenly being knee-high.
+const KENNEY_SCALE := 2.6
+var _kenney_anim: AnimationPlayer = null
+
+## QUATERNIUS UPGRADE (2026-07-27): "feels like Roblox" -- the user's own
+## complaint about Kenney's chunky/blocky chibi look, wanting a real upgrade.
+## Built via a Blender headless pipeline (combines a Quaternius base body
+## with a hairstyle mesh onto their shared 65-bone rig -- confirmed identical
+## bone naming across the base-character and animation-library glTFs before
+## writing any retargeting code, so this was a same-rig NLA bake, not real
+## cross-rig retargeting) that renames the animation library's own clip names
+## onto this codebase's "idle"/"walk"/"attack-melee-left"/
+## "attack-melee-right"/"die" convention. See assets/humans_quaternius/ -- 6
+## body+hair combinations.
+const QUATERNIUS_CHARACTERS := [
+	"quaternius_male_buzzed", "quaternius_male_simpleparted", "quaternius_male_bearded",
+	"quaternius_female_long", "quaternius_female_buns", "quaternius_female_buzzed",
+]
+# the combined body+hair export measures ~1.81m tall unscaled (already
+# full-adult scale, unlike Kenney's stylized ~0.67m) -- scaled down slightly
+# to match this game's existing ~1.75m human convention exactly.
+const QUATERNIUS_SCALE := 0.97
+var _quaternius_anim: AnimationPlayer = null
+
+func _maybe_upgrade_to_real_model() -> void:
+	if get_node_or_null("Leg0") != null or get_node_or_null("KenneyModel") != null or get_node_or_null("QuaterniusModel") != null:
+		return   # already real (built fresh, or already upgraded once)
+	if _try_quaternius_model():
+		return
+	if _try_kenney_model():
+		return
+	_try_generated_model()
+
+func _clear_old_primitive_body() -> void:
+	# free the old parts IMMEDIATELY (not queue_free -- that's deferred to the
+	# next idle frame, so a new node also named "Mesh" added right after would
+	# get auto-renamed to avoid a collision with the still-present old one,
+	# and anim.setup()'s later get_node_or_null("Mesh") would grab that stale,
+	# about-to-be-freed reference instead of the new real model -- exactly the
+	# "previously freed instance" crash this avoids).
+	var old_mesh := get_node_or_null("Mesh")
+	if old_mesh != null:
+		remove_child(old_mesh)
+		old_mesh.free()
+	var old_face := get_node_or_null("Face")
+	if old_face != null:
+		remove_child(old_face)
+		old_face.free()
+
+func _try_quaternius_model() -> bool:
+	var pick: String = QUATERNIUS_CHARACTERS[randi() % QUATERNIUS_CHARACTERS.size()]
+	var glb_path := "res://assets/humans_quaternius/%s.glb" % pick
+	if not ResourceLoader.exists(glb_path):
+		return false
+	var packed: PackedScene = load(glb_path)
+	var model := packed.instantiate()
+	var ap := _find_node_named(model, "AnimationPlayer") as AnimationPlayer
+	if ap == null:
+		model.queue_free()
+		return false
+	_clear_old_primitive_body()
+	model.name = "QuaterniusModel"
+	model.scale = Vector3(QUATERNIUS_SCALE, QUATERNIUS_SCALE, QUATERNIUS_SCALE)
+	add_child(model)
+	_quaternius_anim = ap
+	# loop_mode isn't reliably set on glTF-imported clips -- these Animation
+	# resources are shared across every instance using this same character
+	# file, so setting it once here is enough for all of them.
+	for clip_name in ["walk", "idle"]:
+		if ap.has_animation(clip_name):
+			ap.get_animation(clip_name).loop_mode = Animation.LOOP_LINEAR
+	ap.play("idle")
+	return true
+
+func _try_kenney_model() -> bool:
+	var pick: String = KENNEY_CHARACTERS[randi() % KENNEY_CHARACTERS.size()]
+	var glb_path := "res://assets/humans_real/%s.glb" % pick
+	if not ResourceLoader.exists(glb_path):
+		return false
+	var packed: PackedScene = load(glb_path)
+	var model := packed.instantiate()
+	var ap := _find_node_named(model, "AnimationPlayer") as AnimationPlayer
+	if ap == null:
+		model.queue_free()
+		return false
+	_clear_old_primitive_body()
+	model.name = "KenneyModel"
+	model.scale = Vector3(KENNEY_SCALE, KENNEY_SCALE, KENNEY_SCALE)
+	add_child(model)
+	_kenney_anim = ap
+	# loop_mode isn't reliably set on glTF-imported clips -- these Animation
+	# resources are shared across every instance using this same character
+	# file, so setting it once here is enough for all of them.
+	for clip_name in ["walk", "idle"]:
+		if ap.has_animation(clip_name):
+			ap.get_animation(clip_name).loop_mode = Animation.LOOP_LINEAR
+	ap.play("idle")
+	return true
+
+func _try_generated_model() -> bool:
+	var glb_path := "res://assets/humans/human.glb"
+	if not ResourceLoader.exists(glb_path):
+		return false
+	var packed: PackedScene = load(glb_path)
+	var model := packed.instantiate()
+	var mesh_node := _find_node_named(model, "Mesh")
+	if mesh_node == null:
+		model.queue_free()
+		return false
+	_clear_old_primitive_body()
+	for part_name in ["Mesh", "Leg0", "Leg1", "HeadMarker"]:
+		var part := _find_node_named(model, part_name)
+		if part != null:
+			part.get_parent().remove_child(part)
+			add_child(part)
+	model.queue_free()
+	var hm := get_node_or_null("HeadMarker")
+	if hm != null and hm is Node3D:
+		_build_googly_eyes_marker(hm, 0.115)
+	return true
+
+## Recursive child-name search -- same small helper animal.gd/npc.gd each
+## keep their own copy of.
+func _find_node_named(root: Node, part_name: String) -> Node:
+	if root.name == part_name:
+		return root
+	for c in root.get_children():
+		var found := _find_node_named(c, part_name)
+		if found != null:
+			return found
+	return null
+
+# Same shared googly-eye look, attached to the real model's HeadMarker empty.
+func _build_googly_eyes_marker(parent: Node3D, head_radius: float) -> void:
+	for side in [-1.0, 1.0]:
+		var eye := MeshInstance3D.new()
+		var es := SphereMesh.new()
+		es.radius = head_radius * 0.32
+		es.height = head_radius * 0.64
+		eye.mesh = es
+		eye.position = Vector3(side * head_radius * 0.55, head_radius * 0.25, head_radius * 0.85)
+		eye.material_override = MatCache.flat(Color(1, 1, 1))
+		parent.add_child(eye)
+
+		var pupil := MeshInstance3D.new()
+		var ps := SphereMesh.new()
+		ps.radius = head_radius * 0.14
+		ps.height = head_radius * 0.28
+		pupil.mesh = ps
+		pupil.position = Vector3(randf_range(-0.04, 0.04) * head_radius, randf_range(-0.04, 0.04) * head_radius, head_radius * 0.3)
+		pupil.material_override = MatCache.flat(Color(0.05, 0.05, 0.05))
+		eye.add_child(pupil)
+
 # the visual parts BodyAnim drives — the body and (if present) the face block
 func _anim_parts() -> Array:
 	var out: Array = []
@@ -999,9 +1191,22 @@ func _anim_parts() -> Array:
 
 # breathe, bob, lean, and let trust/hunger show in the posture
 func _animate_body(delta: float) -> void:
+	var spd := Vector2(velocity.x, velocity.z).length()
+	# Kenney/Quaternius model: a REAL rig with its own baked walk/idle clips
+	# -- play those instead of BodyAnim's procedural bob (anim.tick()/
+	# _animate_legs() already no-op safely for this body since _anim_parts()/
+	# _legs stay empty when there's no "Mesh"/"Leg0" to find, but skip the
+	# dead work anyway). Quaternius checked first since it's the
+	# higher-priority tier (see _maybe_upgrade_to_real_model()); only one of
+	# the two is ever non-null on a given member.
+	var real_anim: AnimationPlayer = _quaternius_anim if _quaternius_anim != null else _kenney_anim
+	if real_anim != null:
+		var clip := "walk" if spd > 0.3 else "idle"
+		if real_anim.has_animation(clip) and real_anim.current_animation != clip:
+			real_anim.play(clip)
+		return
 	if anim == null:
 		return
-	var spd := Vector2(velocity.x, velocity.z).length()
 	# alert & upright when bonded and fed; slumped when hungry or walking out
 	var m := clampf(relationship * 0.45 - hunger / 110.0, -1.0, 1.0)
 	if _leaving:
@@ -1010,6 +1215,32 @@ func _animate_body(delta: float) -> void:
 	# nerves from a fresh hit fade out over a second or so
 	anim.tension = maxf(0.0, anim.tension - delta * 1.5)
 	anim.tick(delta, spd, is_on_floor())
+	_animate_legs(delta, spd)
+
+## Real per-leg walk cycle for the biped model -- alternating gait (left/right
+## swing opposite), the natural walk for 2 legs, same rotate-from-hip
+## technique as animal.gd's 4-leg version. No-op on the old capsule fallback
+## (_legs stays empty there).
+const LEG_SWING_MAX := 0.5
+const LEG_SWING_REF_SPEED := 2.0
+
+## AXIS FIX (2026-07-27): "legs go sideways not forward/backward" -- see
+## animal.gd's own copy of this fix for the full explanation. Rotating LOCAL
+## Z (not X) is what swings the foot fore-and-aft after the Blender->glTF
+## Y-up export remaps axes (forward/back stays Godot X, Blender's side-to-
+## side Y becomes Godot Z).
+func _animate_legs(delta: float, speed: float) -> void:
+	if _legs.size() < 2:
+		return
+	var move := clampf(speed / LEG_SWING_REF_SPEED, 0.0, 1.0)
+	if move < 0.03:
+		for l in _legs:
+			(l as Node3D).rotation.z = move_toward((l as Node3D).rotation.z, 0.0, delta * 6.0)
+		return
+	_leg_phase += delta * (5.0 + speed * 2.0)
+	var swing := LEG_SWING_MAX * move
+	(_legs[0] as Node3D).rotation.z = sin(_leg_phase) * swing
+	(_legs[1] as Node3D).rotation.z = sin(_leg_phase + PI) * swing
 
 func _build_combat_visuals() -> void:
 	_club_model = MeshInstance3D.new()
@@ -1070,43 +1301,124 @@ func _update_combat_visuals() -> void:
 ## existing style everywhere else (no imported models/sprites anywhere in
 ## the codebase) -- shape, size, AND color all differ per tier so they read
 ## as genuinely different weapons at a glance, not just a recolor.
+const REAL_AXE_GLB := "res://assets/survival/tool-axe.glb"
+# REAL ASSETS (2026-07-27): joe345's "Low Poly Simple Melee Weapon Pack"
+# (itch.io, CC0, downloaded not generated) -- a different source than the
+# Kenney/OpenGameArt packs used everywhere else, per "let's use a bunch of
+# assets from different sources". Both are single-mesh, multiple flat
+# (untextured) material slots baked per-part -- confirmed via inspection, so
+# material_override is deliberately left null to keep their baked coloring
+# (recoloring would flatten blade/handle/grip to one solid color and lose
+# the multi-tone look these were modeled with).
+const REAL_DAGGER_GLB := "res://assets/weapons/Dagger.glb"
+const REAL_SPEAR_GLB := "res://assets/weapons/Spear.glb"
+var _real_axe_mesh: Mesh = null   # cached so repeated tier-swaps don't re-load the file
+var _real_dagger_mesh: Mesh = null
+var _real_spear_mesh: Mesh = null
+
 func _update_weapon_visual() -> void:
 	_visual_weapon = weapon
 	var mesh: Mesh
-	var mat: StandardMaterial3D
+	var mat: StandardMaterial3D = null   # null = use the real model's own baked texture, not a flat override
 	var rot := Vector3(55, 0, 0)
+	var scl := Vector3.ONE
 	match weapon:
-		1:  # Spear -- long, thin, pale wood shaft
-			var cyl := CylinderMesh.new()
-			cyl.top_radius = 0.03
-			cyl.bottom_radius = 0.03
-			cyl.height = 1.3
-			mesh = cyl
-			mat = MatCache.flat(Color(0.62, 0.56, 0.42))
+		1:  # Spear -- REAL ASSET: joe345's Spear.glb, same long Y-axis shaft
+			# the old CylinderMesh (height 1.3) used, so the same default
+			# rot=(55,0,0) this codebase already held it at still applies.
+			mesh = _get_real_spear_mesh()
+			if mesh != null:
+				scl = Vector3(0.6, 0.6, 0.6)   # measured height 2.196 -- scaled to the old cylinder's 1.3
+			else:
+				var cyl := CylinderMesh.new()
+				cyl.top_radius = 0.03
+				cyl.bottom_radius = 0.03
+				cyl.height = 1.3
+				mesh = cyl
+				mat = MatCache.flat(Color(0.62, 0.56, 0.42))
 		2:  # Bow -- a squashed ring read edge-on as a curved bow silhouette
+			# (no bow in the melee weapon pack -- stays a primitive)
 			var tor := TorusMesh.new()
 			tor.inner_radius = 0.22
 			tor.outer_radius = 0.27
 			mesh = tor
 			mat = MatCache.flat(Color(0.35, 0.22, 0.12))
 			rot = Vector3(0, 0, 90)
-		3:  # Axe -- wide, flat, metallic head instead of a slim shaft
-			var box := BoxMesh.new()
-			box.size = Vector3(0.34, 0.06, 0.30)
-			mesh = box
-			mat = MatCache.flat(Color(0.6, 0.62, 0.66), 0.4, 0.6)
-		_:  # Club (0, and any unrecognised tier) -- the original plain stick
-			var clm := BoxMesh.new()
-			clm.size = Vector3(0.1, 0.1, 0.8)
-			mesh = clm
-			mat = MatCache.flat(Color(0.45, 0.30, 0.15))
+			scl = Vector3(0.45, 1.0, 1.0)   # squash the torus into a bow curve
+		3:  # Axe -- REAL ASSET (2026-07-27): Kenney Survival Kit's
+			# tool-axe.glb (CC0, downloaded not generated), textured, used
+			# AS-IS (mat stays null -- no override). Falls back to the old
+			# flat box head if the asset is missing.
+			mesh = _get_real_axe_mesh()
+			if mesh != null:
+				rot = Vector3(0, 0, 0)
+				scl = Vector3(2.2, 2.2, 2.2)   # tool-axe.glb measured ~0.11x0.256x0.03 -- scaled to a held-weapon size
+			else:
+				var box := BoxMesh.new()
+				box.size = Vector3(0.34, 0.06, 0.30)
+				mesh = box
+				mat = MatCache.flat(Color(0.6, 0.62, 0.66), 0.4, 0.6)
+		_:  # Club (0, and any unrecognised tier) -- REAL ASSET: joe345's
+			# Dagger.glb, the smallest/plainest blade in the pack, standing
+			# in for the starting-tier weapon. Falls back to the original
+			# plain stick if missing.
+			mesh = _get_real_dagger_mesh()
+			if mesh != null:
+				scl = Vector3(2.5, 2.5, 2.5)   # measured height 0.312 -- scaled to the old club box's 0.8 length
+			else:
+				var clm := BoxMesh.new()
+				clm.size = Vector3(0.1, 0.1, 0.8)
+				mesh = clm
+				mat = MatCache.flat(Color(0.45, 0.30, 0.15))
 	_club_model.mesh = mesh
 	_club_model.material_override = mat
 	_club_model.rotation_degrees = rot
-	if weapon == 2:
-		_club_model.scale = Vector3(0.45, 1.0, 1.0)   # squash the torus into a bow curve
-	else:
-		_club_model.scale = Vector3.ONE
+	_club_model.scale = scl
+
+func _get_real_axe_mesh() -> Mesh:
+	if _real_axe_mesh != null:
+		return _real_axe_mesh
+	if not ResourceLoader.exists(REAL_AXE_GLB):
+		return null
+	var packed: PackedScene = load(REAL_AXE_GLB)
+	var inst := packed.instantiate()
+	var found := _find_node_named(inst, "tool-axe")
+	if found == null or not (found is MeshInstance3D):
+		inst.queue_free()
+		return null
+	_real_axe_mesh = (found as MeshInstance3D).mesh
+	inst.queue_free()
+	return _real_axe_mesh
+
+func _get_real_dagger_mesh() -> Mesh:
+	if _real_dagger_mesh != null:
+		return _real_dagger_mesh
+	if not ResourceLoader.exists(REAL_DAGGER_GLB):
+		return null
+	var packed: PackedScene = load(REAL_DAGGER_GLB)
+	var inst := packed.instantiate()
+	var found := _find_node_named(inst, "Dagger")
+	if found == null or not (found is MeshInstance3D):
+		inst.queue_free()
+		return null
+	_real_dagger_mesh = (found as MeshInstance3D).mesh
+	inst.queue_free()
+	return _real_dagger_mesh
+
+func _get_real_spear_mesh() -> Mesh:
+	if _real_spear_mesh != null:
+		return _real_spear_mesh
+	if not ResourceLoader.exists(REAL_SPEAR_GLB):
+		return null
+	var packed: PackedScene = load(REAL_SPEAR_GLB)
+	var inst := packed.instantiate()
+	var found := _find_node_named(inst, "Spear")
+	if found == null or not (found is MeshInstance3D):
+		inst.queue_free()
+		return null
+	_real_spear_mesh = (found as MeshInstance3D).mesh
+	inst.queue_free()
+	return _real_spear_mesh
 
 ## Real visual per armor tier -- previously armor had NO visual at all despite
 ## having real stat effects (armor_reduction()). A flattened chest-mounted
@@ -1553,6 +1865,12 @@ func _apply_tint() -> void:
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = p["color"]
 	mi.material_override = mat
+	# the real model's legs are SEPARATE MeshInstance3D objects (see
+	# tools/gen_humans.py) -- recolor them too so the whole body reads as one
+	# uniformly-tinted person instead of a mismatched torso+legs.
+	for leg in _legs:
+		if leg is MeshInstance3D:
+			leg.material_override = mat
 
 # ── per-physics-frame: brain ticks, bond decay, thoughts, and movement ──
 var _grid_cd: float = 0.0
@@ -2358,6 +2676,7 @@ func _rank_thought(rank: String) -> String:
 		"Friend": return "I trust you now, friend."
 		"Loyal": return "I'd fight beside you."
 		"Devoted": return "Lead us. I'm with you to the end."
+		"Soulbound": return "I feel you now, even when you're far away."
 		_: return "Who is this?"
 
 func _ambient_thought() -> String:
@@ -3165,7 +3484,105 @@ func starve(delta: float) -> void:
 # ─────────────────────────────────────────────────────────────────────────────
 # THE STEERING — move_and_slide toward a target on the XZ plane, with gravity.
 # ─────────────────────────────────────────────────────────────────────────────
+## TURTLE-ISLAND AWARENESS (2026-07-27): "npcs and computer players are
+## floating and falling off turtles" -- in turtle_islands mode there is no
+## ground except each turtle's own small disc (the ocean floor is real but
+## deep underwater everywhere else -- see terrain_gen.gd's all_ocean). Every
+## AI branch inside _move_impl() below was written for the old "solid ground
+## everywhere" world and has zero awareness that walking past the player's
+## own island's edge means walking off a cliff into open water. This checks
+## ONE guardrail first: if we've drifted off the disc, SWIM instead of
+## running the normal AI this frame.
+##
+## Two things had to be fixed to get this right, both confirmed via a live
+## debug-teleport test:
+## 1. Running the swim AND the normal AI in the same frame produced a stable
+##    orbit -- the AI's own tangential movement exactly offset the swim pull
+##    inward, so distance-from-home never actually shrank. Fixed by skipping
+##    _move_impl() entirely while swimming, so nothing fights the correction.
+## 2. Swimming toward home via move_and_slide() ALSO orbited, at a radius
+##    suspiciously close to the disc's own turtle_radius -- because the
+##    disc's collision is a solid CylinderShape3D, and approaching it
+##    horizontally at water level means literally colliding with its SIDE
+##    WALL, which move_and_slide() slides along instead of crossing. A
+##    swimmer can only mount the disc from ABOVE its edge, not by ramming the
+##    side. Fixed by bypassing move_and_slide() entirely for the swim itself
+##    (a direct position write can freely overlap since there's nothing else
+##    out in open water to collide with) and easing Y up toward the deck's
+##    own height the whole way, so the final approach climbs onto the disc
+##    instead of colliding with it edge-on.
 func _move(delta: float) -> void:
+	_weld_home_pos_to_island()
+	if _turtle_swim_recovery(delta):
+		return
+	_move_impl(delta)
+
+## BUG FIX (2026-07-27): "still trees and npcs not stuck to island" -- a
+## SEPARATE bug from the swim-recovery above. `_anchor()` (the center
+## _wander() orbits) returns `home_pos`, a plain Vector3 set once at spawn
+## and otherwise only rewritten by a few deliberate one-time relocations
+## (founding an outpost, migrating to a settlement, defecting after
+## starvation -- see those call sites' own comments). None of those ever
+## update it to track ongoing drift, so it stayed frozen at wherever the
+## player's island was AT THAT MOMENT while the island (correctly parented,
+## silently tracking via ordinary transform inheritance) kept moving out
+## from under it -- members wandered increasingly far from the actual camp,
+## toward an ever-more-stale point. Rather than overwrite home_pos outright
+## (which would stomp the deliberate relocations above), this welds it: adds
+## the SAME frame-to-frame delta onto whatever home_pos currently is, exactly
+## like FPSPlayer.gd's own _update_turtle_weld() does for the player. Whether
+## home_pos is the original spawn anchor or a relocated one, it keeps riding
+## along with however far the player's island has drifted since last frame.
+var _home_pos_weld_last: Vector3 = Vector3.ZERO
+var _home_pos_weld_ready: bool = false
+
+func _weld_home_pos_to_island() -> void:
+	if manager == null or not bool(manager.get("turtle_islands")):
+		return
+	var pi = manager.get("player_island")
+	if pi == null or not is_instance_valid(pi):
+		return
+	if not _home_pos_weld_ready:
+		_home_pos_weld_ready = true
+		_home_pos_weld_last = pi.global_position
+		return
+	var move_delta: Vector3 = pi.global_position - _home_pos_weld_last
+	move_delta.y = 0.0
+	home_pos += move_delta
+	_home_pos_weld_last = pi.global_position
+
+const TURTLE_SWIM_SPEED := 3.5
+
+func _turtle_swim_recovery(delta: float) -> bool:
+	if manager == null or not bool(manager.get("turtle_islands")):
+		return false
+	var home_turtle = manager.get("player_island")
+	if home_turtle == null or not is_instance_valid(home_turtle):
+		return false
+	var r: float = float(home_turtle.get("turtle_radius"))
+	if r <= 0.0:
+		return false
+	var away: Vector3 = global_position - home_turtle.global_position
+	away.y = 0.0
+	var d := away.length()
+	if d <= r - 2.0:
+		return false   # safely on the disc -- normal AI movement applies
+	# SWIMMING: direct position write, not move_and_slide() -- see the
+	# function comment above for why. Eases toward the deck's own height the
+	# whole way so the approach climbs onto the disc rather than colliding
+	# with its side.
+	var dir: Vector3 = -away.normalized() if d > 0.01 else Vector3.FORWARD
+	global_position.x += dir.x * TURTLE_SWIM_SPEED * delta
+	global_position.z += dir.z * TURTLE_SWIM_SPEED * delta
+	# BUG FIX (2026-07-28): this used to duplicate TURTLE_FREEBOARD as a local
+	# hardcoded constant, which drifted out of sync the moment the real one
+	# (turtle_island.gd) got retuned. Ask the turtle itself instead.
+	var deck_y: float = home_turtle.global_position.y + float(home_turtle.deck_height()) + 0.5
+	global_position.y = move_toward(global_position.y, deck_y, 2.5 * delta)
+	velocity = Vector3.ZERO
+	return true
+
+func _move_impl(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= gravity * delta
 	else:

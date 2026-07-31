@@ -60,22 +60,37 @@ func _build() -> void:
 	base.material_override = MatCache.flat(Color(0.40, 0.28, 0.16))
 	add_child(base)
 
-	# the sack/food pile (scales with supplies)
-	_pile = MeshInstance3D.new()
-	var pm := BoxMesh.new()
-	pm.size = Vector3(2.2, 1.0, 2.2)
-	_pile.mesh = pm
+	# the sack/food pile (scales with supplies) -- REAL ASSET (2026-07-27):
+	# Kenney Survival Kit's box-large.glb (CC0, downloaded not generated),
+	# textured (shares assets/survival/Textures/colormap.png), used AS-IS --
+	# no material_override, that would wipe the baked texture. Falls back to
+	# the old BoxMesh if the asset is missing. Still scales on Y with supply
+	# level exactly as before -- .scale works on any mesh.
+	_pile = _try_real_mesh("res://assets/survival/box-large.glb")
+	if _pile == null:
+		_pile = MeshInstance3D.new()
+		var pm := BoxMesh.new()
+		pm.size = Vector3(2.2, 1.0, 2.2)
+		_pile.mesh = pm
+		_pile.material_override = MatCache.flat(Color(0.85, 0.7, 0.35))
+	else:
+		_pile.scale = Vector3(4.4, 2.0, 2.2)   # box-large.glb measured 0.25x0.25x0.5 -- scaled to the old pile's footprint
 	_pile.position = Vector3(0, 0.8, 0)
-	_pile.material_override = MatCache.flat(Color(0.85, 0.7, 0.35))
 	add_child(_pile)
 
-	# a small rack of clubs off to the side
-	_clubs_rack = MeshInstance3D.new()
-	var cm := BoxMesh.new()
-	cm.size = Vector3(0.3, 0.3, 1.4)
-	_clubs_rack.mesh = cm
+	# a small rack of tools off to the side -- Kenney's tool-axe.glb, same
+	# real-asset/fallback convention as the pile above.
+	_clubs_rack = _try_real_mesh("res://assets/survival/tool-axe.glb")
+	if _clubs_rack == null:
+		_clubs_rack = MeshInstance3D.new()
+		var cm := BoxMesh.new()
+		cm.size = Vector3(0.3, 0.3, 1.4)
+		_clubs_rack.mesh = cm
+		_clubs_rack.material_override = MatCache.flat(Color(0.45, 0.30, 0.15))
+	else:
+		_clubs_rack.scale = Vector3(2.6, 1.2, 4.5)   # tool-axe.glb measured ~0.11x0.256x0.03 -- scaled to a visible rack size
+		_clubs_rack.rotation_degrees = Vector3(0, 0, 90)
 	_clubs_rack.position = Vector3(2.0, 0.6, 0)
-	_clubs_rack.material_override = MatCache.flat(Color(0.45, 0.30, 0.15))
 	add_child(_clubs_rack)
 
 	_label = Label3D.new()
@@ -87,6 +102,32 @@ func _build() -> void:
 	                        # unreadable jumble (Label3D scales with camera
 	                        # distance like normal geometry, no built-in cap)
 	add_child(_label)
+
+## Loads a real .glb, pulls its first MeshInstance3D out of the glTF's own
+## wrapper node, and returns it detached (ready to reposition/scale/add as a
+## child) -- or null if the asset is missing. Same small helper shape used
+## across mineral.gd/tree_field.gd for the same purpose.
+func _try_real_mesh(glb_path: String) -> MeshInstance3D:
+	if not ResourceLoader.exists(glb_path):
+		return null
+	var packed: PackedScene = load(glb_path)
+	var inst := packed.instantiate()
+	var found := _find_mesh(inst)
+	if found == null:
+		inst.queue_free()
+		return null
+	found.get_parent().remove_child(found)
+	inst.queue_free()
+	return found
+
+func _find_mesh(root_node: Node) -> MeshInstance3D:
+	if root_node is MeshInstance3D:
+		return root_node as MeshInstance3D
+	for c in root_node.get_children():
+		var f := _find_mesh(c)
+		if f != null:
+			return f
+	return null
 
 func _process(_delta: float) -> void:
 	if manager == null:
