@@ -1,0 +1,346 @@
+<title>Spikeling Bridge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#f7f3ec;
+    --panel:#ffffff;
+    --panel-2:#f0e9dc;
+    --line:#ddd1ba;
+    --ink:#241c12;
+    --ink-dim:#6b5f4c;
+    --amber:#c7620a;
+    --amber-ink:#8a4406;
+    --amber-bg:#fbe6cd;
+    --code-bg:#241c12;
+    --code-ink:#f2ece2;
+    --code-dim:#b9a992;
+    --good:#3f7d3a;
+    --bad:#a03b3b;
+    --shadow: 0 1px 2px rgba(36,28,18,0.06), 0 8px 24px rgba(36,28,18,0.06);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#100d09;
+      --panel:#1a140d;
+      --panel-2:#221a10;
+      --line:#3a2c18;
+      --ink:#f2ece2;
+      --ink-dim:#b9a992;
+      --amber:#ff9d3d;
+      --amber-ink:#ffb968;
+      --amber-bg:#3a2410;
+      --code-bg:#0c0a06;
+      --code-ink:#f2ece2;
+      --code-dim:#8f8270;
+      --good:#7bc46f;
+      --bad:#e07a7a;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#100d09;
+    --panel:#1a140d;
+    --panel-2:#221a10;
+    --line:#3a2c18;
+    --ink:#f2ece2;
+    --ink-dim:#b9a992;
+    --amber:#ff9d3d;
+    --amber-ink:#ffb968;
+    --amber-bg:#3a2410;
+    --code-bg:#0c0a06;
+    --code-ink:#f2ece2;
+    --code-dim:#8f8270;
+    --good:#7bc46f;
+    --bad:#e07a7a;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  }
+
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:'Inter',system-ui,sans-serif;
+    line-height:1.6;
+  }
+  .page{max-width:840px; margin:0 auto; padding:64px 24px 96px;}
+
+  .eyebrow{
+    font-family:'JetBrains Mono',monospace; font-size:12.5px; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--amber-ink); font-weight:600;
+    display:flex; align-items:center; gap:8px;
+  }
+  .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--amber);box-shadow:0 0 8px 1px var(--amber);}
+
+  h1{
+    font-size:clamp(32px,5vw,44px); font-weight:800; letter-spacing:-0.02em;
+    margin:14px 0 8px; text-wrap:balance;
+  }
+  .lede{font-size:18px; color:var(--ink-dim); max-width:640px; margin:0 0 36px;}
+
+  h2{
+    font-size:22px; font-weight:700; letter-spacing:-0.01em; margin:56px 0 6px;
+    display:flex; align-items:baseline; gap:10px;
+  }
+  h2 .num{font-family:'JetBrains Mono',monospace; font-size:14px; color:var(--amber-ink); font-weight:600;}
+  h3{font-size:16px; font-weight:700; margin:28px 0 10px;}
+  p{margin:0 0 14px; max-width:66ch;}
+  a{color:var(--amber-ink);}
+  code{font-family:'JetBrains Mono',monospace; font-size:0.9em; background:var(--panel-2); padding:1px 5px; border-radius:4px;}
+
+  .tags{display:flex; flex-wrap:wrap; gap:8px; margin:18px 0 8px;}
+  .tag{
+    font-family:'JetBrains Mono',monospace; font-size:12px; padding:5px 10px;
+    border-radius:999px; border:1px solid var(--line); color:var(--ink-dim);
+    background:var(--panel);
+  }
+
+  .card{
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:20px 22px; box-shadow:var(--shadow); margin:16px 0;
+  }
+  .card p:last-child{margin-bottom:0;}
+
+  pre{
+    background:var(--code-bg); color:var(--code-ink); border-radius:10px;
+    padding:16px 18px; overflow-x:auto; font-family:'JetBrains Mono',monospace;
+    font-size:13px; line-height:1.65; margin:12px 0; box-shadow:var(--shadow);
+  }
+  pre .c{color:var(--code-dim);}
+  code.file{font-family:'JetBrains Mono',monospace; color:var(--amber-ink); font-weight:600; background:none; padding:0;}
+
+  .terminal{
+    background:var(--code-bg); color:var(--code-ink); border-radius:10px;
+    padding:18px 20px; font-family:'JetBrains Mono',monospace; font-size:13px;
+    line-height:1.7; overflow-x:auto; box-shadow:var(--shadow); margin:14px 0;
+  }
+  .terminal .prompt{color:var(--code-dim);}
+  .terminal .say{color:var(--amber-ink); font-weight:600;}
+  .terminal .trust{color:var(--good);}
+  .terminal .neg{color:var(--bad);}
+
+  table{width:100%; border-collapse:collapse; font-size:14.5px; margin:14px 0;}
+  th,td{text-align:left; padding:9px 12px; border-bottom:1px solid var(--line);}
+  th{font-family:'JetBrains Mono',monospace; font-size:11.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-dim); font-weight:600;}
+  td.num{font-family:'JetBrains Mono',monospace; font-variant-numeric:tabular-nums;}
+  .clear{color:var(--good); font-weight:600;}
+  .miss{color:var(--bad); font-weight:600;}
+
+  .callout{
+    border-left:3px solid var(--amber); background:var(--amber-bg); border-radius:0 10px 10px 0;
+    padding:14px 18px; margin:16px 0; font-size:14.5px;
+  }
+  .callout b{color:var(--amber-ink);}
+
+  figure{margin:20px 0;}
+  figcaption{font-size:13px; color:var(--ink-dim); margin-top:8px; text-align:center;}
+  svg{max-width:100%; height:auto; display:block; margin:0 auto;}
+
+  .wide{overflow-x:auto;}
+
+  footer{
+    margin-top:72px; padding-top:24px; border-top:1px solid var(--line);
+    font-size:13.5px; color:var(--ink-dim);
+  }
+
+  ::selection{background:var(--amber-bg); color:var(--amber-ink);}
+</style>
+
+<div class="page">
+
+  <div class="eyebrow"><span class="dot"></span>Tribe &middot; Spikeling &middot; real, runnable, verified this session</div>
+  <h1>A spiking neural network drives NPC minds &mdash; and a local LLM speaks from their real state</h1>
+  <p class="lede">
+    Tribe is a Godot NPC trust/loyalty simulation. Every member's "brain" is a real
+    spiking neural network (leaky integrate-and-fire neurons, Spikeling), not a
+    behavior tree or a state machine wearing a neuroscience name. This page walks
+    through the actual code, then runs it live: a betrayal event drives real
+    membrane-potential dynamics, a topologically-inspired memory chain decides how
+    vividly it's recalled, and a local LLM (Ollama, llama3.2) generates dialogue
+    conditioned on that live numeric state &mdash; not a script.
+  </p>
+  <div class="tags">
+    <span class="tag">GDScript / Godot</span>
+    <span class="tag">Spikeling SNN engine</span>
+    <span class="tag">LIF neurons + Hebbian synapses</span>
+    <span class="tag">SSH topological memory</span>
+    <span class="tag">Ollama / llama3.2, local</span>
+  </div>
+
+  <h2><span class="num">01</span>The pipeline</h2>
+  <p>Every NPC has one live SNN as its brain. A game event stimulates a neuron;
+  membrane potential integrates, leaks, and eventually crosses threshold and fires;
+  a small numeric snapshot of that state is turned into plain-English facts; those
+  facts become the LLM's persona prompt. The arrow only ever points one way &mdash;
+  the LLM reads the brain, it never writes back into it.</p>
+
+  <figure>
+    <svg viewBox="0 0 720 190" role="img" aria-label="Pipeline: game event stimulates the Spikeling SNN, which updates Trust and the SSH memory chain; brain_snapshot and core_memory_blame_line turn that state into text; the text becomes the LLM persona prompt; Ollama generates dialogue; the LLM never writes back to the SNN.">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+        </marker>
+      </defs>
+      <g fill="none" stroke="currentColor" stroke-width="1.4">
+        <rect x="10" y="60" width="118" height="60" rx="8"/>
+        <rect x="188" y="40" width="150" height="100" rx="8"/>
+        <rect x="398" y="60" width="150" height="60" rx="8"/>
+        <rect x="608" y="60" width="104" height="60" rx="8"/>
+      </g>
+      <g font-family="Inter, sans-serif" font-size="12.5" fill="currentColor" text-anchor="middle">
+        <text x="69" y="86">Game event</text>
+        <text x="69" y="102" font-size="10.5" opacity="0.7">e.g. betray()</text>
+        <text x="263" y="72">Spikeling SNN</text>
+        <text x="263" y="90" font-size="10.5" opacity="0.7">Trust neuron +</text>
+        <text x="263" y="103" font-size="10.5" opacity="0.7">SSH memory chain</text>
+        <text x="473" y="72">brain_snapshot() +</text>
+        <text x="473" y="88">core_memory_</text>
+        <text x="473" y="104">blame_line()</text>
+        <text x="660" y="86">Local LLM</text>
+        <text x="660" y="102" font-size="10.5" opacity="0.7">Ollama llama3.2</text>
+      </g>
+      <g stroke="currentColor" stroke-width="1.4" marker-end="url(#arrow)">
+        <line x1="128" y1="90" x2="184" y2="90"/>
+        <line x1="338" y1="90" x2="394" y2="90"/>
+        <line x1="548" y1="90" x2="604" y2="90"/>
+      </g>
+      <g font-family="JetBrains Mono, monospace" font-size="10.5" fill="currentColor" opacity="0.75" text-anchor="middle">
+        <text x="156" y="82">stimulate()</text>
+        <text x="366" y="82">text</text>
+        <text x="576" y="82">prompt</text>
+      </g>
+      <path d="M660,120 C660,165 263,165 263,144" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="3 3" opacity="0.55" marker-end="url(#arrow)" transform="rotate(180 461 152)"/>
+      <text x="461" y="176" font-family="Inter, sans-serif" font-size="11" fill="currentColor" opacity="0.55" text-anchor="middle">one-directional &mdash; the LLM only reads the SNN, it never writes back</text>
+    </svg>
+    <figcaption>Fig. 1 &mdash; the real call path: <code>tribemember.gd</code> &rarr; <code>tribe_chat.gd</code> &rarr; <code>tribe_llm.gd</code>.</figcaption>
+  </figure>
+
+  <h2><span class="num">02</span>The real neuron</h2>
+  <p>No framework underneath this &mdash; <code class="file">spikeling.gd</code> is a from-scratch
+  leaky integrate-and-fire implementation. One <code>step()</code> call advances every
+  neuron in the network: leak, integrate incoming stimulus, check threshold, fire,
+  propagate to synaptic targets for <em>next</em> tick.</p>
+
+  <pre><span class="c"># spikeling.gd -- the actual step() function every NPC brain calls once per tick</span>
+func step() -&gt; Array:
+    for i in range(neurons.size()):
+        var n: Neuron = neurons[i]
+        if n.refr_left &gt; 0:
+            n.refr_left -= 1
+            continue
+        n.p -= n.leak                      <span class="c"># leaky integration</span>
+        if n.p &lt; 0.0: n.p = 0.0
+        n.p += _pending.get(i, 0.0)        <span class="c"># incoming stimulus</span>
+        if n.p &gt;= n.threshold:
+            n.p = 0.0
+            n.refr_left = refractory_ticks
+            n.fired = true
+            for s in synapses:
+                if s.src == i:
+                    next_pending[s.dst] += s.weight   <span class="c"># lands NEXT step</span>
+    _pending = next_pending</pre>
+
+  <p>Each personality is a genuinely different brain, not a different label on the
+  same one &mdash; a "Trusting" NPC has a stronger contribute&rarr;trust synapse and a
+  slower-leaking Trust neuron than a "Wary" one:</p>
+
+  <pre><span class="c"># tribemember.gd -- the real, personality-specific .spk brain text</span>
+neuron SawBetray     threshold=50  leak=20
+neuron Trust          threshold=100 leak=2        <span class="c"># "Steady": leak=2, "Wary": leak=4</span>
+neuron Follow          threshold=100 leak=5
+synapse SawContribute -&gt; Trust weight=80
+synapse SawBetray     -&gt; Trust weight=-160        <span class="c"># strong enough to dominate any same-tick positive</span>
+synapse Trust          -&gt; Follow weight=120</pre>
+
+  <h2><span class="num">03</span>Memory with a real physics finding underneath it</h2>
+  <p>This is the part that ties back to the rest of my research: a prior real result
+  from <a href="https://github.com/tritsystem/topological-phononics">a topological-phononics
+  simulation study</a> &mdash; an SSH (Su-Schrieffer-Heeger) chain protects information at its
+  <em>edges</em> against disorder far better than in its <em>bulk</em> &mdash; is wired into an
+  actual NPC feature, not just cited. Each NPC gets a small 12-neuron SSH-style chain
+  as its "core memory." A witnessed betrayal is written to an edge slot (1&ndash;2 hops from
+  a chain boundary); a routine slight goes to a bulk slot (5&ndash;6 hops). Real panic calls
+  <code>apply_stress()</code>, which jitters the chain's synapse weights &mdash; the same
+  disorder mechanism the original physics experiment measured.</p>
+
+  <pre><span class="c"># npc_core_memory.gd -- recall confidence is the WEAKEST hop margin</span>
+<span class="c"># on the path from the chain's nearest boundary to the memory's slot</span>
+func recall(tag: String) -&gt; float:
+    var slot: int = _tag_to_slot[tag]
+    var min_margin: float = 1.0
+    <span class="c"># walk hop-by-hop from the nearest boundary; the chain is only</span>
+    <span class="c"># as strong as its weakest link along that path</span>
+    while idx != slot:
+        min_margin = minf(min_margin, _hop_margin(idx, nxt))
+    return min_margin</pre>
+
+  <p>Run live (a faithful Python port of this exact logic, same seed, three real stress
+  levels):</p>
+
+  <div class="wide">
+  <table>
+    <tr><th>Stress</th><th>Edge confidence</th><th>Bulk confidence</th><th>Blame line (&ge; 0.08)</th></tr>
+    <tr><td class="num">0.0 &mdash; calm</td><td class="num">0.125</td><td class="num">0.125</td><td><span class="clear">both clear</span></td></tr>
+    <tr><td class="num">0.4 &mdash; tense</td><td class="num">0.057</td><td class="num">0.000</td><td><span class="miss">both miss</span> (edge closer)</td></tr>
+    <tr><td class="num">0.8 &mdash; raid panic</td><td class="num">0.000</td><td class="num">0.000</td><td><span class="miss">both miss</span></td></tr>
+  </table>
+  </div>
+  <p style="font-size:13.5px; color:var(--ink-dim);">One representative run, not the statistical claim itself &mdash;
+  the original physics study's real aggregate result (5/5 seeds) is edge-retain ~70% vs.
+  bulk-retain ~22% under matched disorder. What's shown here is that same real mechanism,
+  now driving an actual gameplay feature.</p>
+
+  <h2><span class="num">04</span>Live example &mdash; a betrayal</h2>
+  <p>The trace below is genuine program output, not a mockup. A faithful line-by-line
+  Python port of the real GDScript (built to demo portably without the Godot editor
+  installed) runs the actual scenario: the leader betrays a tribemate, the NPC's SNN
+  updates, the memory chain writes an edge-anchored memory, and the resulting persona
+  string &mdash; assembled by the exact real string-formatting code in
+  <code class="file">tribe_chat.gd</code> &mdash; is sent to a real local Ollama call.</p>
+
+  <div class="terminal">
+<span class="prompt">[tick]</span> Leader gave a gift.  Trust = <span class="trust">80.0</span>
+<span class="prompt">[tick]</span> BETRAYAL LANDS.  Trust = <span class="neg">-84.0</span>  <span class="prompt">(a real, documented quirk: the leak-clamp in step() only floors the leak subtraction, not the full update, so this genuinely reads negative for exactly one tick)</span>
+<span class="prompt">[tick]</span> settles.  Trust = <span class="trust">0.0</span>  <span class="prompt">(rebuilds from 0 from here)</span>
+
+<span class="prompt">[real persona string sent to the LLM]</span>
+  You are Steady and even-tempered. Your standing with the leader is 'Wary'.
+  Your trust in the Leader currently sits around 0 out of 100. You are not
+  currently backing them. The Leader has struck you 1 time. You have not
+  forgotten it. You vividly remember you killing Rin with your own hands --
+  it colors how much you trust the Leader right now, and you should let it show.
+
+<span class="prompt">[calling real local Ollama, model=llama3.2 ...]</span>
+
+<span class="say">Mok says: "I'm still sore from when you hurt me."</span>
+  </div>
+
+  <div class="callout">
+    <b>Why the negative Trust value is left in, not smoothed over:</b> running the
+    faithful port surfaced this transient-negative quirk directly &mdash; a real,
+    documented property of the actual shipped code
+    (<code>spikeling.gd</code>'s own leak-clamp only floors the leak subtraction,
+    not the synaptic update), not something introduced by the port. It resolves
+    itself one tick later. Showing it, rather than quietly rounding it away, is the
+    more honest account of what the system actually does.
+  </div>
+
+  <h2><span class="num">05</span>Why it's built this way</h2>
+  <p>The LLM never sees a hand-written mood label. It sees real numbers pulled
+  straight off a live spiking network &mdash; a membrane potential, a hop-margin recall
+  confidence &mdash; turned into plain sentences. Two NPCs with the same social rank but
+  different lived history sound different, because their underlying Trust neurons
+  genuinely hold different values, not because a designer wrote branching dialogue
+  for each case. The dependency runs one way only: the SNN is the source of truth,
+  the LLM is a renderer for it.</p>
+
+  <footer>
+    Code: <code>spikeling.gd</code>, <code>npc_core_memory.gd</code>,
+    <code>tribemember.gd</code>, <code>tribe_chat.gd</code>, <code>tribe_llm.gd</code>
+    in the Tribe repo. The SSH memory result traces back to a public
+    simulation study at
+    <a href="https://github.com/tritsystem/topological-phononics">github.com/tritsystem/topological-phononics</a>.
+    Demo trace on this page: a faithful Python port run against a real local
+    Ollama (llama3.2) instance, not a scripted or edited transcript.
+  </footer>
+
+</div>
