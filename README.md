@@ -87,6 +87,58 @@ configured), or:
 godot4 --headless --export-release "Windows Desktop" tribe.exe
 ```
 
+## Handoff context (2026-08-26 session — read this first if picking up work)
+
+This session did three real, verified pieces of work, in this order. Full
+reasoning/verification for each lives in the linked source; this section
+is a map, not a duplicate.
+
+**1. Removed the turtle-island system** (commits `496d212`, pushed).
+Player-island/turtle-island/troll mechanics (bundled into an earlier
+"Accumulated tribe development" commit alongside unrelated asset/NPC
+fixes, which were kept) are fully stripped: `world_tribe.gd` back to
+`extends Node3D`, `Tribemanager.gd`'s `MAP_EXTENT` scaling reverted
+3x→1x, the ~140-line turtle-encounter UI gone, swim-recovery/home-weld
+machinery gone from `npc.gd`/`animal.gd`/`dog.gd`/`FPSPlayer.gd`.
+`water_crossing.gd` was deliberately KEPT — it's the general, unrelated
+archipelago boat-crossing system, not turtle-specific. Verified via
+fresh headless boot, zero script/parse errors.
+
+**2. Added DirectVoice** (commit `31159cf`, pushed) — a second,
+deterministic, LLM-free NPC dialogue path alongside the existing
+Ollama-based `say_as()`. See `direct_voice.gd` (new) and
+`tribe_llm.gd`'s `say_as_direct()`. Built in response to a public
+technical critique (an LLM isn't genuinely "the SNN's voice") that
+checked out as correct. Verified in real Godot: real Trust-potential
+values tracked correctly through a betrayal scenario, personality
+divergence confirmed real (Steady/Trusting/Wary produced different
+Trust trajectories from their own `trust_leak` params), 12/12 checks
+passed both before and after the turtle-island removal. Currently
+switchable via `tribe_chat.gd`'s `USE_DIRECT_VOICE_FOR_LIVE_TEST` const
+(`true` right now — routes one live chat call site to DirectVoice for
+in-game testing; flip to `false` to go back to the normal Ollama path
+for that call site, no other call sites affected).
+
+Full side-by-side code + a data-flow diagram of both voice paths:
+[`portfolio_demo/SNN_ARCHITECTURE.md`](portfolio_demo/SNN_ARCHITECTURE.md)
+(commit `e37f5f6`, pushed).
+
+**3. Scoped (not started) a neuron-type expansion.** The main Spikeling
+engine (`Documents/Spikeling/core/`) already has Izhikevich, AdEx, and
+Resonator neuron types — none are ported into this project's
+`spikeling.gd`, which only has LIF. Full scope, priority order, and
+explicit out-of-scope calls (no backprop-trainable SNNs, no Brian2-style
+biological realism — neither has an identified gameplay payoff here):
+`Documents/Spikeling/vault/Projects/tribe-neuron-type-expansion.md`.
+**Recommended next step**: port the Resonator neuron type and test
+whether it can unify with or replace the existing TribeDrums Kuramoto
+emergent-sync mechanic (a real, already-hardware-validated neuron type
+solving an adjacent problem to an existing, separate Tribe system) —
+this is the one candidate with a genuine existing hook, not a
+speculative one. Do not build AdEx's betrayal-adaptation idea or
+Izhikevich speculatively without a real before/after comparison first,
+per this project's own verification discipline throughout this README.
+
 ## Status / known caveats
 
 - `player.tscn` and `tribemember.tscn` are stale/orphaned — their root
