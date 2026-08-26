@@ -94,6 +94,32 @@ var _warming := false
 const HysteresisGateScript = preload("res://hysteresis_gate.gd")
 var _queue_gate: HysteresisGate
 
+# ── DIRECT VOICE (2026-08-26): a second, LLM-free backend ───────────────────
+# say_as() above is a real, working "async local-LLM voice via Ollama" and
+# that stays completely unchanged by this section -- same prompt, same
+# timeout, same queue, same fallback logic. This is a SEPARATE entry point
+# for a genuinely deterministic "spikes-to-text" decoder (direct_voice.gd):
+# no HTTP request, no queue, no model, no randomness -- it bands the NPC's
+# real live neuron numbers straight into a small fixed phrase table and
+# emits line_ready SYNCHRONOUSLY, in the same call. Callers pick whichever
+# backend they want per line; nothing here forces a choice project-wide.
+const DirectVoiceScript = preload("res://direct_voice.gd")
+
+## Ask an NPC to say something via the deterministic, LLM-free path. Same
+## `line_ready` signal as say_as(), so callers can swap between the two
+## without touching anything downstream. Every argument here is a real
+## number/string already read off this NPC's own Spikeling brain --
+## see tribemember.gd's brain_snapshot() (trust, betrayed_count) and
+## core_memory_best_recall() (recall_confidence, described_memory), the
+## exact same reads say_as()'s callers already take, just handed to a
+## deterministic decoder instead of folded into a prose prompt for Ollama.
+func say_as_direct(speaker: String, listener: String, personality: String, trust: float,
+		betrayed_count: int, recall_confidence: float, described_memory: String,
+		tag: String = "chat") -> void:
+	var text: String = DirectVoiceScript.compose_line(
+		personality, trust, betrayed_count, recall_confidence, described_memory)
+	line_ready.emit(speaker, listener, text, tag)
+
 func _ready() -> void:
 	_http = HTTPRequest.new()
 	add_child(_http)

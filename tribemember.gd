@@ -865,6 +865,40 @@ func core_memory_blame_line() -> String:
 		return " You vividly remember %s -- it colors how much you trust the Leader right now, and you should let it show." % described
 	return " Some part of you remembers something bad involving the Leader, but everything since has worn it hazy -- you're not sure it should still weigh on you."
 
+## Same best-core-tag selection as core_memory_blame_line() above, but
+## returns the RAW numbers instead of an LLM-facing sentence -- for
+## direct_voice.gd's deterministic decoder, which bands these itself rather
+## than reusing prose written for a language model to riff on. Kept as a
+## real accessor (not duplicated inline in direct_voice.gd) so both voice
+## paths read the exact same recall() confidence for the exact same tag.
+## Raw Trust neuron potential -- the SAME brain.get_potential("Trust") read
+## brain_snapshot() and core_memory_best_recall()'s callers already take.
+## Exposed as a real accessor (not inlined at each call site) so code that
+## only has `member` typed as a plain `Node` (e.g. tribe_chat.gd's _say_to())
+## can reach it via .call() the same way it already reaches brain_snapshot()
+## and core_memory_best_recall() -- calling `.brain.get_potential(...)`
+## directly on a Node-typed variable is the exact untyped-member-access
+## gotcha this repo avoids elsewhere in this file's own callers.
+func get_trust_potential() -> float:
+	return brain.get_potential("Trust")
+
+func core_memory_best_recall() -> Dictionary:
+	if _core_memory == null:
+		return {"confidence": 0.0, "described": ""}
+	var tags: Array = _core_memory.core_tags()
+	if tags.is_empty():
+		return {"confidence": 0.0, "described": ""}
+	var best_tag: String = ""
+	var best_conf: float = -1.0
+	for t in tags:
+		var c: float = recall_core_memory(str(t))
+		if c > best_conf:
+			best_conf = c
+			best_tag = str(t)
+	if best_conf <= 0.0:
+		return {"confidence": 0.0, "described": ""}
+	return {"confidence": best_conf, "described": _describe_core_tag(best_tag)}
+
 ## "if npcs die to hunger have other npcs blame leader for negligence" --
 ## distinct from witness_tribemate_death() below (an outside threat/raid):
 ## this is specifically about the LEADER'S stockpile failing to feed the
@@ -3484,105 +3518,7 @@ func starve(delta: float) -> void:
 # ─────────────────────────────────────────────────────────────────────────────
 # THE STEERING — move_and_slide toward a target on the XZ plane, with gravity.
 # ─────────────────────────────────────────────────────────────────────────────
-## TURTLE-ISLAND AWARENESS (2026-07-27): "npcs and computer players are
-## floating and falling off turtles" -- in turtle_islands mode there is no
-## ground except each turtle's own small disc (the ocean floor is real but
-## deep underwater everywhere else -- see terrain_gen.gd's all_ocean). Every
-## AI branch inside _move_impl() below was written for the old "solid ground
-## everywhere" world and has zero awareness that walking past the player's
-## own island's edge means walking off a cliff into open water. This checks
-## ONE guardrail first: if we've drifted off the disc, SWIM instead of
-## running the normal AI this frame.
-##
-## Two things had to be fixed to get this right, both confirmed via a live
-## debug-teleport test:
-## 1. Running the swim AND the normal AI in the same frame produced a stable
-##    orbit -- the AI's own tangential movement exactly offset the swim pull
-##    inward, so distance-from-home never actually shrank. Fixed by skipping
-##    _move_impl() entirely while swimming, so nothing fights the correction.
-## 2. Swimming toward home via move_and_slide() ALSO orbited, at a radius
-##    suspiciously close to the disc's own turtle_radius -- because the
-##    disc's collision is a solid CylinderShape3D, and approaching it
-##    horizontally at water level means literally colliding with its SIDE
-##    WALL, which move_and_slide() slides along instead of crossing. A
-##    swimmer can only mount the disc from ABOVE its edge, not by ramming the
-##    side. Fixed by bypassing move_and_slide() entirely for the swim itself
-##    (a direct position write can freely overlap since there's nothing else
-##    out in open water to collide with) and easing Y up toward the deck's
-##    own height the whole way, so the final approach climbs onto the disc
-##    instead of colliding with it edge-on.
 func _move(delta: float) -> void:
-	_weld_home_pos_to_island()
-	if _turtle_swim_recovery(delta):
-		return
-	_move_impl(delta)
-
-## BUG FIX (2026-07-27): "still trees and npcs not stuck to island" -- a
-## SEPARATE bug from the swim-recovery above. `_anchor()` (the center
-## _wander() orbits) returns `home_pos`, a plain Vector3 set once at spawn
-## and otherwise only rewritten by a few deliberate one-time relocations
-## (founding an outpost, migrating to a settlement, defecting after
-## starvation -- see those call sites' own comments). None of those ever
-## update it to track ongoing drift, so it stayed frozen at wherever the
-## player's island was AT THAT MOMENT while the island (correctly parented,
-## silently tracking via ordinary transform inheritance) kept moving out
-## from under it -- members wandered increasingly far from the actual camp,
-## toward an ever-more-stale point. Rather than overwrite home_pos outright
-## (which would stomp the deliberate relocations above), this welds it: adds
-## the SAME frame-to-frame delta onto whatever home_pos currently is, exactly
-## like FPSPlayer.gd's own _update_turtle_weld() does for the player. Whether
-## home_pos is the original spawn anchor or a relocated one, it keeps riding
-## along with however far the player's island has drifted since last frame.
-var _home_pos_weld_last: Vector3 = Vector3.ZERO
-var _home_pos_weld_ready: bool = false
-
-func _weld_home_pos_to_island() -> void:
-	if manager == null or not bool(manager.get("turtle_islands")):
-		return
-	var pi = manager.get("player_island")
-	if pi == null or not is_instance_valid(pi):
-		return
-	if not _home_pos_weld_ready:
-		_home_pos_weld_ready = true
-		_home_pos_weld_last = pi.global_position
-		return
-	var move_delta: Vector3 = pi.global_position - _home_pos_weld_last
-	move_delta.y = 0.0
-	home_pos += move_delta
-	_home_pos_weld_last = pi.global_position
-
-const TURTLE_SWIM_SPEED := 3.5
-
-func _turtle_swim_recovery(delta: float) -> bool:
-	if manager == null or not bool(manager.get("turtle_islands")):
-		return false
-	var home_turtle = manager.get("player_island")
-	if home_turtle == null or not is_instance_valid(home_turtle):
-		return false
-	var r: float = float(home_turtle.get("turtle_radius"))
-	if r <= 0.0:
-		return false
-	var away: Vector3 = global_position - home_turtle.global_position
-	away.y = 0.0
-	var d := away.length()
-	if d <= r - 2.0:
-		return false   # safely on the disc -- normal AI movement applies
-	# SWIMMING: direct position write, not move_and_slide() -- see the
-	# function comment above for why. Eases toward the deck's own height the
-	# whole way so the approach climbs onto the disc rather than colliding
-	# with its side.
-	var dir: Vector3 = -away.normalized() if d > 0.01 else Vector3.FORWARD
-	global_position.x += dir.x * TURTLE_SWIM_SPEED * delta
-	global_position.z += dir.z * TURTLE_SWIM_SPEED * delta
-	# BUG FIX (2026-07-28): this used to duplicate TURTLE_FREEBOARD as a local
-	# hardcoded constant, which drifted out of sync the moment the real one
-	# (turtle_island.gd) got retuned. Ask the turtle itself instead.
-	var deck_y: float = home_turtle.global_position.y + float(home_turtle.deck_height()) + 0.5
-	global_position.y = move_toward(global_position.y, deck_y, 2.5 * delta)
-	velocity = Vector3.ZERO
-	return true
-
-func _move_impl(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= gravity * delta
 	else:

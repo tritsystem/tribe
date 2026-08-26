@@ -15,6 +15,18 @@ extends Node
 # `open` is checked by FPSPlayer before it consumes ANY input.
 # ─────────────────────────────────────────────────────────────────────────────
 
+## TEMP (2026-08-26): route the player's direct chat line through the new
+## LLM-free DirectVoice decoder (TribeLLM.say_as_direct()) instead of the
+## normal say_as()/Ollama path, ONLY at the one call site below -- purely so
+## a human can watch a real NPC speak a direct-voice line in ACTUAL live
+## gameplay (Enter near a member -> type -> Enter), not just in
+## test_direct_voice.gd's headless harness. Nothing else changed: NPC<->NPC
+## chatter (tribe_talk.gd), poem requests, and every other say_as()/
+## compose_as() call site are untouched. REVERT: flip this to false (or
+## delete it and the `if USE_DIRECT_VOICE_FOR_LIVE_TEST:` block in _say_to()
+## below) to restore the normal Ollama reply for player chat.
+const USE_DIRECT_VOICE_FOR_LIVE_TEST := true
+
 const TALK_RANGE := 8.0        # how close you must be to address someone
 const HOLD := 6.0              # seconds their reply stays above their head
 const LOG_LINES := 8
@@ -290,6 +302,22 @@ func _say_to(member: Node, text: String, delay: float) -> void:
 		TribeLLM.compose_as(npc_name, _flavour(str(member.get("personality"))),
 			TribeMemory.context_for(npc_name, "You"), TribePoetry.situation_for(member),
 			form, TribePoetry.fallback_verse(member, form), "player_poem")
+		return
+
+	# TEMP: see USE_DIRECT_VOICE_FOR_LIVE_TEST's declaration up top -- for live
+	# verification only, this ONE call site skips the normal say_as()/Ollama
+	# reply below entirely and answers via the deterministic, LLM-free
+	# DirectVoice decoder instead, using the exact same real brain reads
+	# (get_trust_potential(), betrayed_count, core_memory_best_recall()) the
+	# headless test_direct_voice.gd harness already exercises.
+	if USE_DIRECT_VOICE_FOR_LIVE_TEST:
+		var recall: Dictionary = member.call("core_memory_best_recall") \
+			if member.has_method("core_memory_best_recall") else {"confidence": 0.0, "described": ""}
+		var trust_now: float = float(member.call("get_trust_potential")) \
+			if member.has_method("get_trust_potential") else 0.0
+		TribeLLM.say_as_direct(npc_name, "You", str(member.get("personality")), trust_now,
+			int(member.get("betrayed_count")), float(recall.get("confidence", 0.0)),
+			str(recall.get("described", "")), "player")
 		return
 
 	var brain_text: String = str(member.call("brain_snapshot")) if member.has_method("brain_snapshot") else ""
