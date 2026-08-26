@@ -74,37 +74,6 @@ const BOAT_SPEED := 8.0        # how fast the boat sails
 var _boat: MeshInstance3D = null
 var _on_boat: bool = false
 
-# ── TURTLE ISLANDS: welded (not reparented) onto whichever turtle you're
-# standing on, so normal walking/gravity/move_and_slide still work exactly as
-# on static land -- only the island's own frame-to-frame drift gets added on
-# top each physics tick. Reparenting a live camera-holding CharacterBody3D
-# into a different subtree mid-motion is the real risk this sidesteps (see
-# the turtle-island plan's Phase 1 note); this is the same "weld" idiom
-# _drive_boat() already uses for the player riding a boat. ──
-var _riding_turtle = null
-var _riding_turtle_last_pos: Vector3 = Vector3.ZERO
-
-# ── TURTLE STEERING (Phase 4) — [Alt] toggles driving whichever turtle you're
-# currently welded to (_riding_turtle above), IF it's steerable (world_tribe.gd
-# sets that true once you've earned "trusted" trust with it via Phase 3's
-# quests; player_island.gd defaults it true -- it's your own camp, you don't
-# need to quest for the right to steer it). Alt was the one key confirmed
-# genuinely free after auditing every other binding in the project.
-var _steering_turtle_ref = null
-const TURTLE_STEER_SPEED := 4.0        # brisker than ambient drift (2.2) -- deliberate driving should read as faster
-const TURTLE_STEER_SPACING_MARGIN := 12.0   # mirrors world_tribe.gd's TURTLE_SPACING_MARGIN
-
-# MIGRATION WHISTLE RESPONSE LAG (2026-07-28): world_tribe.gd's turtle_trust
-# (0..1, the SAME scalar that already gates whether a rival island is
-# steerable at all -- "trusted" tier, 0.60+) now also gates HOW WELL it
-# responds once you're steering it: sluggish right at 0.60, crisp by 0.85+
-# ("bonded"). Real reason to keep questing after steering unlocks, not just a
-# binary permission flag. player_island.gd has no turtle_trust var at all (by
-# design -- "you already command it, no quest needed"), so its steering stays
-# exactly as instant/precise as before this change; the lag ONLY applies to a
-# turtle that actually HAS the property, checked via `"turtle_trust" in ...`.
-var _steer_heading: Vector3 = Vector3.ZERO   # smoothed direction, only used when a trust-lag applies
-
 # SOULBOUND EYE-LINK (2026-07-28): [B] confirmed free (Alt/R/WASD/Space/Ctrl/F/
 # C/G/X/Y/L/Z/Period/Comma/H/J/[/]/K/M/V/Shift/1-7/0/O/I/P/Apostrophe/N/9 all
 # taken -- see the audit that picked Alt above). No range gate on purpose: the
@@ -245,32 +214,11 @@ func _physics_process(delta: float) -> void:
 
 	_survival(delta)
 
-	# Applies BEFORE the normal walk/water logic below, so this frame's turtle
-	# drift is folded into global_position before gravity/move_and_slide runs
-	# on top of it -- an ADDITIVE weld, not a takeover like boat-driving. Skips
-	# itself while on a boat (that already fully owns global_position writes)
-	# or while actively steering (_drive_turtle already applies the same-frame
-	# move directly, so the weld would double it).
-	if not _on_boat and _steering_turtle_ref == null:
-		_update_turtle_weld()
-
 	# CHAT GATE: no movement/jump keys while typing (gravity + move_and_slide still
 	# run below, so you settle on the ground instead of freezing mid-air)
 	var chatting: bool = TribeChat.open or TribeTradeUI.open or TribeTradeMenu.open or TribeOverview.open or TribeInventoryUI.open
 
-	# [Alt] toggles steering the turtle you're currently welded to (Phase 4).
-	# Not while on a boat -- that's its own separate takeover of global_position.
-	if not _on_boat and not chatting and _key_just(KEY_ALT):
-		_toggle_turtle_steering()
-
-	if _steering_turtle_ref != null:
-		_drive_turtle(delta, chatting)
-		return
-
-	# [B] toggles the Soulbound eye-link. Checked after steering (steering the
-	# turtle and seeing through a member's eyes are both "possess something
-	# else" modes -- mutually exclusive, steering wins if somehow both keys
-	# land the same frame, same precedence the boat/steer checks already use).
+	# [B] toggles the Soulbound eye-link.
 	if not _on_boat and not chatting and _key_just(KEY_B):
 		_toggle_soul_link()
 
@@ -365,126 +313,6 @@ func _swim(wl: float, delta: float, chatting: bool) -> void:
 		velocity.z = move_toward(velocity.z, 0.0, SWIM_SPEED)
 	move_and_slide()
 
-# ── TURTLE ISLAND WELD ──
-# Finds whichever turtle-island (if any) the player is currently standing on
-# and adds that island's frame-to-frame drift to global_position -- the same
-# weld idiom _drive_boat() uses below, just additive instead of a full
-# position takeover, since walking around a moving camp should still feel
-# like normal walking (gravity, collision with fences/teepees, etc. all keep
-# working -- only the ground itself is quietly sliding).
-func _update_turtle_weld() -> void:
-	if manager == null or not bool(manager.get("turtle_islands")):
-		return
-	var found = null
-	# Check the player's OWN island first (the common case -- most of a
-	# playthrough happens at home) before scanning every rival.
-	var home = manager.get("player_island")
-	if home != null and is_instance_valid(home) and home.has_method("is_on_turtle") \
-			and home.is_on_turtle(global_position.x, global_position.z):
-		found = home
-	if found == null and "world_tribes" in manager:
-		for wt in manager.world_tribes:
-			if wt == null or not is_instance_valid(wt) or not bool(wt.get("is_turtle")):
-				continue
-			if wt.has_method("is_on_turtle") and wt.is_on_turtle(global_position.x, global_position.z):
-				found = wt
-				break
-	if found != _riding_turtle:
-		_riding_turtle = found
-		if _riding_turtle != null and is_instance_valid(_riding_turtle):
-			_riding_turtle_last_pos = _riding_turtle.global_position
-	if _riding_turtle != null and is_instance_valid(_riding_turtle):
-		var turtle_delta: Vector3 = _riding_turtle.global_position - _riding_turtle_last_pos
-		turtle_delta.y = 0.0   # horizontal drift only -- vertical stays governed by normal gravity/floor snap
-		global_position += turtle_delta
-		_riding_turtle_last_pos = _riding_turtle.global_position
-	else:
-		_riding_turtle = null
-
-## [Alt] — engage/release steering on whichever turtle _update_turtle_weld()
-## says you're currently standing on. Mirrors _build_boat()/_exit_boat()'s
-## shape: a toggle, gated on eligibility, with a flash message either way.
-func _toggle_turtle_steering() -> void:
-	if _steering_turtle_ref != null:
-		_steering_turtle_ref = null
-		if manager: manager.set("_steering_turtle", null)
-		_boat_flash("You lower the whistle — the island drifts on its own again.")
-		return
-	if _riding_turtle == null or not is_instance_valid(_riding_turtle):
-		_boat_flash("Nothing to steer here.")
-		return
-	if not bool(_riding_turtle.get("steerable")):
-		_boat_flash("This island doesn't trust you enough to steer it yet.")
-		return
-	_steering_turtle_ref = _riding_turtle
-	_steer_heading = Vector3.ZERO
-	if manager: manager.set("_steering_turtle", _riding_turtle)
-	_boat_flash("You blow the migration whistle — WASD to steer, [Alt] to lower it.")
-
-## Direct position write on the turtle's root, exactly like _drive_boat()'s
-## direct write on the boat mesh -- children (camp, NPCs) come along for free
-## via normal scene-tree parenting. The player is moved by the same delta in
-## the same frame (no weld lag) so you stay anchored on deck while driving.
-func _drive_turtle(delta: float, chatting: bool) -> void:
-	if _steering_turtle_ref == null or not is_instance_valid(_steering_turtle_ref):
-		_steering_turtle_ref = null
-		if manager: manager.set("_steering_turtle", null)
-		return
-	var input_dir := Vector2.ZERO
-	if not chatting:
-		if Input.is_key_pressed(KEY_W): input_dir.y -= 1
-		if Input.is_key_pressed(KEY_S): input_dir.y += 1
-		if Input.is_key_pressed(KEY_A): input_dir.x -= 1
-		if Input.is_key_pressed(KEY_D): input_dir.x += 1
-	input_dir = input_dir.normalized()
-	var direction := (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
-	velocity = Vector3.ZERO
-	# WHISTLE RESPONSE LAG: only turtles with a turtle_trust stat (rivals, once
-	# earned) get smoothed/sluggish response -- see the field comment above
-	# _steer_heading. player_island.gd has no such property, so `has_trust_stat`
-	# is false there and direction passes through untouched, exactly as before.
-	var has_trust_stat: bool = "turtle_trust" in _steering_turtle_ref
-	if has_trust_stat and direction.length() >= 0.01:
-		var trust: float = float(_steering_turtle_ref.get("turtle_trust"))
-		# trust < 0.60 shouldn't be steerable at all (see steerable's own gate),
-		# but clamp defensively rather than trust that invariant blindly here.
-		var t: float = clampf((trust - 0.60) / 0.40, 0.0, 1.0)   # 0 at bare "trusted", 1 at "bonded"+
-		var response_rate: float = lerpf(1.4, 12.0, t)   # sluggish drift -> crisp, near-instant
-		_steer_heading = _steer_heading.lerp(direction, clampf(response_rate * delta, 0.0, 1.0))
-		if _steer_heading.length() > 0.01:
-			direction = _steer_heading.normalized()
-	if direction.length() < 0.01:
-		return
-	var cur: Vector3 = _steering_turtle_ref.global_position
-	var next_pos: Vector3 = cur + direction * TURTLE_STEER_SPEED * delta
-	if manager != null and "MAP_EXTENT" in manager:
-		var extent: float = float(manager.MAP_EXTENT)
-		next_pos.x = clampf(next_pos.x, -extent, extent)
-		next_pos.z = clampf(next_pos.z, -extent, extent)
-	# don't steer INTO another turtle -- the steered turtle skips its own
-	# ambient-drift repulsion tick while a player is driving it (see
-	# world_tribe.gd's _turtle_tick), so that check has to happen here instead.
-	# Per-pair radius-based threshold (not a flat constant) -- see
-	# world_tribe.gd's TURTLE_SPACING_MARGIN comment for why a flat distance
-	# doesn't work once islands have genuinely different radii.
-	var steer_radius: float = float(_steering_turtle_ref.get("turtle_radius"))
-	if manager != null:
-		if "world_tribes" in manager:
-			for other in manager.world_tribes:
-				if other == _steering_turtle_ref or not is_instance_valid(other) or not bool(other.get("is_turtle")):
-					continue
-				var need: float = steer_radius + float(other.get("turtle_radius")) + TURTLE_STEER_SPACING_MARGIN
-				if Vector2(next_pos.x - other.global_position.x, next_pos.z - other.global_position.z).length() < need:
-					return   # blocked -- too close, hold position this frame
-		var home = manager.get("player_island")
-		if home != null and home != _steering_turtle_ref and is_instance_valid(home):
-			var need_home: float = steer_radius + float(home.get("turtle_radius")) + TURTLE_STEER_SPACING_MARGIN
-			if Vector2(next_pos.x - home.global_position.x, next_pos.z - home.global_position.z).length() < need_home:
-				return
-	var applied: Vector3 = next_pos - cur
-	_steering_turtle_ref.global_position = next_pos
-	global_position += applied
-
 ## [B] — link to whichever tribe member has reached Soulbound with you (there's
 ## no rank-based cycling yet: first Soulbound member found in manager.members
 ## wins. Fine for now since Soulbound is the rarest rank by a wide margin --
@@ -507,8 +335,8 @@ func _toggle_soul_link() -> void:
 
 ## Position-only follow (see the field comment above _soul_link_ref for why
 ## rotation is deliberately left to the player's own mouse look). Zeroes
-## velocity same as _drive_turtle -- the player's own body just holds still
-## at whatever spot it linked from until the link ends.
+## velocity -- the player's own body just holds still at whatever spot it
+## linked from until the link ends.
 func _drive_soul_link(delta: float) -> void:
 	if _soul_link_ref == null or not is_instance_valid(_soul_link_ref):
 		_soul_link_ref = null
@@ -855,13 +683,6 @@ func _swing_club() -> void:
 		own.take_hit((18.0 if has_club else 9.0) * dmg_mult, self)
 		manager.notify("You strike %s! They will not forget this." % str(own.get("member_name")))
 		return
-	# 1c) strike a troll guarding an island (Phase 6, turtle-island revamp) --
-	# its own group + priority slot, same spot in the chain as other combatants
-	var troll := _nearest_in_group("troll", CLUB_REACH)
-	if troll and troll.has_method("take_hit"):
-		troll.take_hit((18.0 if has_club else 9.0) * dmg_mult, self)
-		manager.notify("You strike the troll!")
-		return
 	# 2) smash an enemy camp's totem — the blow is routed to their actual
 	# infrastructure (teepees first, then the stockpile); knock both down to
 	# conquer the tribe and convert their whole roster
@@ -979,9 +800,8 @@ func _build_fence() -> void:
 	fwd = fwd.normalized()
 	var pos := global_position + fwd * 2.2
 	# BUG FIX (2026-07-28): a flat pos.y=0.0 assumed world ground level sat at
-	# Y=0 -- true for the old flat-floor game, wrong on a turtle island (deck
-	# sits near water_level + the shell's freeboard). ground_y() is the
-	# canonical "surface height here" query and is turtle-aware.
+	# Y=0 -- wrong on sloped/hilly terrain. ground_y() is the canonical
+	# "surface height here" query.
 	pos.y = manager.ground_y(pos.x, pos.z) if manager.has_method("ground_y") else 0.0
 	manager.try_build_fence(pos, atan2(fwd.x, fwd.z), true)
 
@@ -1018,8 +838,8 @@ func _stack_top(at: Vector3) -> float:
 	var col_x: float = round(at.x / 2.0) * 2.0
 	var col_z: float = round(at.z / 2.0) * 2.0
 	# BUG FIX (2026-07-28): a flat 1.0 assumed world ground level sat at Y=0
-	# (block center at half its own height) -- wrong on a turtle island, where
-	# ground_y() (turtle-aware) is the real surface height at this spot.
+	# (block center at half its own height) -- wrong on sloped/hilly terrain,
+	# where ground_y() is the real surface height at this spot.
 	var base_y := 1.0
 	if manager and manager.has_method("ground_y"):
 		base_y = manager.ground_y(at.x, at.z) + 1.0

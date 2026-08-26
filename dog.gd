@@ -372,73 +372,7 @@ func _brain_tick() -> void:
 		anim.pop(0.3)
 
 # ─────────────────────────────────────────────────────────────────────────────
-## TURTLE-ISLAND AWARENESS (2026-07-27): see tribemember.gd's own copy of this
-## fix for the full reasoning (including two bugs found via a live
-## debug-teleport test: running the AI alongside the swim produces a stable
-## orbit, and swimming via move_and_slide() orbits too since the disc's
-## collision is a solid cylinder whose SIDE a horizontal swim collides with
-## and slides along rather than crossing -- fixed by skipping the normal AI
-## entirely while swimming, and using a direct position write that climbs
-## toward the deck's height instead of move_and_slide()). Dogs have no fixed
-## owning tribe (a wild stray may not be on the player's own island), so the
-## home turtle is resolved once (nearest to `home`, the guard/spawn anchor)
-## and cached.
 func _move(delta: float) -> void:
-	if _turtle_swim_recovery(delta):
-		return
-	_move_impl(delta)
-
-const TURTLE_SWIM_SPEED := 3.5
-var _cached_home_turtle = null
-
-func _resolve_home_turtle():
-	if _cached_home_turtle != null and is_instance_valid(_cached_home_turtle):
-		return _cached_home_turtle
-	if manager == null:
-		return null
-	var best = null
-	var best_d := INF
-	var pi = manager.get("player_island")
-	if pi != null and is_instance_valid(pi):
-		best_d = Vector2(home.x - pi.global_position.x, home.z - pi.global_position.z).length()
-		best = pi
-	if "world_tribes" in manager:
-		for wt in manager.world_tribes:
-			if wt == null or not is_instance_valid(wt):
-				continue
-			var d := Vector2(home.x - wt.global_position.x, home.z - wt.global_position.z).length()
-			if d < best_d:
-				best_d = d
-				best = wt
-	_cached_home_turtle = best
-	return best
-
-func _turtle_swim_recovery(delta: float) -> bool:
-	if manager == null or not bool(manager.get("turtle_islands")):
-		return false
-	var home_turtle = _resolve_home_turtle()
-	if home_turtle == null or not is_instance_valid(home_turtle):
-		return false
-	var r: float = float(home_turtle.get("turtle_radius"))
-	if r <= 0.0:
-		return false
-	var away: Vector3 = global_position - home_turtle.global_position
-	away.y = 0.0
-	var d := away.length()
-	if d <= r - 2.0:
-		return false   # safely on the disc -- normal AI movement applies
-	var dir: Vector3 = -away.normalized() if d > 0.01 else Vector3.FORWARD
-	global_position.x += dir.x * TURTLE_SWIM_SPEED * delta
-	global_position.z += dir.z * TURTLE_SWIM_SPEED * delta
-	# BUG FIX (2026-07-28): stop duplicating TURTLE_FREEBOARD as a local
-	# constant -- it drifted out of sync the moment the real one
-	# (turtle_island.gd) got retuned. Ask the turtle itself instead.
-	var deck_y: float = home_turtle.global_position.y + float(home_turtle.deck_height()) + 0.5
-	global_position.y = move_toward(global_position.y, deck_y, 2.5 * delta)
-	velocity = Vector3.ZERO
-	return true
-
-func _move_impl(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= gravity * delta
 	else:

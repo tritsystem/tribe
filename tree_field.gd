@@ -102,26 +102,7 @@ func _find_mesh(root_node: Node) -> MeshInstance3D:
 func mark_dirty() -> void:
 	_dirty = true
 
-# DRIFT RE-BAKE (2026-07-27): "the trees aren't stuck to the islands" -- a
-# turtle-owned tree.gd node IS correctly parented onto its island (see
-# world_tribe.gd's _spawn_resource_grove()/_tick_local_resources()) and its
-# real global_position silently tracks the drift for free, same as any other
-# child node. But this field only ever baked that position into the
-# MultiMesh's instance transform on mark_dirty() (spawn or chop) -- nothing
-# ever re-baked it just because a tree's parent island kept moving in
-# between those events, so the RENDERED mesh froze at spawn position while
-# the actual (invisible) logic node kept drifting along underneath it. Only
-# worth the periodic cost in turtle_islands mode, where trees can actually
-# move after spawning at all.
-var _drift_recheck_accum: float = 0.0
-const DRIFT_RECHECK_INTERVAL := 0.5
-
 func _process(delta: float) -> void:
-	_drift_recheck_accum -= delta
-	if _drift_recheck_accum <= 0.0:
-		_drift_recheck_accum = DRIFT_RECHECK_INTERVAL
-		if _turtle_islands_active():
-			_dirty = true
 	if not _dirty:
 		return
 	_accum -= delta
@@ -130,10 +111,6 @@ func _process(delta: float) -> void:
 	_accum = REBUILD_INTERVAL
 	_dirty = false
 	_rebuild()
-
-func _turtle_islands_active() -> bool:
-	var mgr = get_tree().get_first_node_in_group("tribe_manager")
-	return mgr != null and bool(mgr.get("turtle_islands"))
 
 # Rebuild every species' instance buffer from the current live trees. Skips
 # nodes queued for deletion, so a just-chopped tree (queue_free()d, still

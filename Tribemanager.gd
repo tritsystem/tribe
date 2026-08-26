@@ -235,23 +235,13 @@ const SMALL_COST      := 1   # fine-detail unit — small, so priced like a stai
 const DOOR_COST       := 2   # a real hinged slab, priced like a roof
 const CLUB_COST      := 4
 const BUILD_RANGE    := 45.0
-var MAP_EXTENT       := 510.0   # 3x (was 170.0), matching territory_radius's 3x bump -- scaled per-preset in _apply_scale — Massive needs
+var MAP_EXTENT       := 170.0   # scaled per-preset in _apply_scale — Massive needs
 								 # far more room to actually spread 1000 tribes out
 								 # (camp placement wants ~34 units of separation each)
 var RESOURCE_EXTENT   := 110.0   # kept in lockstep with MAP_EXTENT in _apply_scale
 								  # — trees/bushes/animals/wanderers must spread as
 								  # far as tribes do, or large-MAP presets (Massive)
 								  # spawn tribes in camps with nothing around them
-
-# ── TURTLE ISLANDS — every rival tribe lives on a giant moving turtle-island
-# instead of a fixed land camp. Independent of SCALE_PRESETS[...]["islands"]
-# (which only ever turned on island_mode for Epic/Massive maps) since "each
-# tribe starts out separate in the sea" is meant to be true on every map
-# size, not just the largest presets. Forces terrain.island_mode on in
-# _build_terrain() regardless of scale when true. ──
-var turtle_islands: bool = true
-var player_island = null   # PlayerIsland instance -- the player's own home camp's turtle, set in _spawn_stockpile()
-var _steering_turtle = null   # Phase 4: whichever turtle (world_tribe.gd or player_island.gd) FPSPlayer is actively driving, or null
 const FACTION_RADIUS := 12.0
 const DOG_POPULATION_MULT := 1.6
 
@@ -339,21 +329,21 @@ const SCALE_PRESETS := {
 		"name": "Skirmish", "minutes": "~5 min",
 		"tribes": 24, "tribe_cap": 24, "start_size": 2, "player_cap": 30,
 		"neutrals": 26, "animals": 90, "bushes": 30, "trees": 1000,
-		"dogs": 10, "war_interval": 5.0,  "dominion": 60.0, "map_extent": 690.0,
+		"dogs": 10, "war_interval": 5.0,  "dominion": 60.0, "map_extent": 230.0,
 		"islands": false,
 	},
 	Scale.STANDARD: {
 		"name": "Standard", "minutes": "~12 min",
 		"tribes": 34, "tribe_cap": 50, "start_size": 3, "player_cap": 50,
 		"neutrals": 45, "animals": 140, "bushes": 44, "trees": 1800,
-		"dogs": 17, "war_interval": 9.0,  "dominion": 100.0, "map_extent": 900.0,
+		"dogs": 17, "war_interval": 9.0,  "dominion": 100.0, "map_extent": 300.0,
 		"islands": false,
 	},
 	Scale.EPIC: {
 		"name": "Epic",     "minutes": "~30 min",
 		"tribes": 48, "tribe_cap": 80, "start_size": 4, "player_cap": 70,
 		"neutrals": 70, "animals": 200, "bushes": 60, "trees": 2600,
-		"dogs": 28, "war_interval": 13.0, "dominion": 150.0, "map_extent": 1260.0,
+		"dogs": 28, "war_interval": 13.0, "dominion": 150.0, "map_extent": 420.0,
 		"islands": true,
 	},
 	# only viable BECAUSE of the simulation LOD (npc.gd/world_tribe.gd) and
@@ -366,7 +356,7 @@ const SCALE_PRESETS := {
 		"name": "Massive",  "minutes": "~60+ min",
 		"tribes": 1000, "tribe_cap": 16, "start_size": 2, "player_cap": 70,
 		"neutrals": 80, "animals": 250, "bushes": 60, "trees": 3000,
-		"dogs": 30, "war_interval": 20.0, "dominion": 240.0, "map_extent": 4200.0,
+		"dogs": 30, "war_interval": 20.0, "dominion": 240.0, "map_extent": 1400.0,
 		"islands": true,
 	},
 }
@@ -640,30 +630,11 @@ func _make_loyal_companion() -> void:
 # WORLD SPAWNING
 # ─────────────────────────────────────────────────────────────────────────────
 func _spawn_stockpile() -> void:
-	# TURTLE ISLANDS: the player's own home camp floats too, same as every
-	# rival tribe -- see player_island.gd. Placed at Vector3.ZERO for X/Z --
-	# terrain doesn't exist yet at this point in startup, so there's no
-	# water_level to ask for Y yet; _build_terrain() seats the Y at sea level
-	# right after generating (see its own comment on why that fix lives there).
-	if turtle_islands:
-		player_island = Node3D.new()
-		player_island.name = "PlayerIsland"
-		player_island.set_script(load("res://player_island.gd"))
-		add_child(player_island)
-		player_island.global_position = Vector3.ZERO
-		player_island.setup(self)
-
 	# untyped: setup happens via custom script (stockpile.gd) attached at runtime
 	var sp = Node3D.new()
 	sp.set_script(load("res://stockpile.gd"))
-	if player_island != null:
-		player_island.add_child(sp)
-		# local Y=0 sat inside the shell's own solid collision once
-		# TURTLE_FREEBOARD was raised -- see world_tribe.gd's _make_npc().
-		sp.position = Vector3(0.0, player_island.deck_height(), 0.0)
-	else:
-		add_child(sp)
-		sp.position = Vector3.ZERO
+	add_child(sp)
+	sp.position = Vector3.ZERO
 	sp.set("manager", self)
 	_spawn_campfire(Vector3(3.0, 0.0, 3.0))
 
@@ -671,19 +642,11 @@ func _spawn_stockpile() -> void:
 ## previously the LLM claimed one existed with nothing built; see
 ## campfire.gd's own header). Seated just off the stockpile, close enough to
 ## be the obvious night gathering point.
-##
-## TURTLE ISLANDS: parented onto player_island with a LOCAL position when
-## turtle mode is on, instead of a global ground_y-seated position -- there's
-## no ground under a floating island to seat onto.
 func _spawn_campfire(pos: Vector3) -> void:
 	var fire := StaticBody3D.new()
 	fire.set_script(load("res://campfire.gd"))
-	if player_island != null:
-		player_island.add_child(fire)
-		fire.position = Vector3(pos.x, player_island.deck_height() + 0.05, pos.z)
-	else:
-		add_child(fire)
-		fire.global_position = Vector3(pos.x, ground_y(pos.x, pos.z) + 0.05, pos.z)
+	add_child(fire)
+	fire.global_position = Vector3(pos.x, ground_y(pos.x, pos.z) + 0.05, pos.z)
 
 # ── CLAN EXPANSION: outpost stockpiles (2026-07-20) ─────────────────────────
 # A member who's genuinely wandered far out (see tribemember.gd's
@@ -736,43 +699,31 @@ func found_outpost(pos: Vector3) -> bool:
 	var sp := Node3D.new()
 	sp.name = "OutpostStockpile"
 	sp.set_script(load("res://stockpile.gd"))
-	# BUG FIX (2026-07-28): "outpost still not on turtle islands" -- this used
-	# to add_child(self) with a fixed GLOBAL position, so the outpost was a
-	# static structure sitting in open ocean the moment whichever turtle the
-	# founding member was actually standing on drifted onward. Parent onto
-	# that turtle instead (same local-offset pattern every other camp
-	# structure uses), so the outpost travels with its island for good.
-	var home_turtle = _turtle_at(pos.x, pos.z)
-	if home_turtle != null:
-		home_turtle.add_child(sp)
-		sp.position = pos - home_turtle.global_position
-	else:
-		add_child(sp)
-		sp.global_position = pos
+	add_child(sp)
+	sp.global_position = pos
 	sp.set("manager", self)
 	sp.set("settlement_name", settlement_name)
 	sp.set("district", district)
 	sp.remove_from_group("stockpile")
 	sp.add_to_group("outpost_stockpile")
 	outposts.append(sp)
-	_build_district_structures(district, pos, home_turtle)
+	_build_district_structures(district, pos)
 	notify_cat("tribe", "The clan has founded %s -- a %s settlement far from camp." % [settlement_name, district])
 	return true
 
 ## Every settlement's baseline homes plus a real structure distinct to its
 ## district, not just a different name. Split out from found_outpost() so
 ## the actual construction is directly testable without depending on the
-## random district roll. `home_turtle` (found_outpost()'s own _turtle_at()
-## lookup, passed through rather than re-resolved) is null off turtle-islands
-## mode, or if this spot genuinely isn't over any turtle's footprint.
-func _build_district_structures(district: String, pos: Vector3, home_turtle = null) -> void:
+## random district roll.
+func _build_district_structures(district: String, pos: Vector3) -> void:
 	var teepee_count: int = 3 if district == "Gathering" else 2
 	for i in range(teepee_count):
 		var ang := TAU * float(i) / float(teepee_count) + randf() * 0.3
 		var hut_pos: Vector3 = pos + Vector3(cos(ang) * 3.0, 0.0, sin(ang) * 3.0)
 		var hut := StaticBody3D.new()
 		hut.set_script(load("res://teepee.gd"))
-		_place_district_piece(hut, hut_pos, 2.5, home_turtle)
+		add_child(hut)
+		hut.global_position = Vector3(hut_pos.x, ground_y(hut_pos.x, hut_pos.z) + 2.5, hut_pos.z)
 	match district:
 		"Watch":
 			# a genuine lookout tower -- real height (3 block courses + a
@@ -780,18 +731,21 @@ func _build_district_structures(district: String, pos: Vector3, home_turtle = nu
 			for course in range(3):
 				var b := StaticBody3D.new()
 				b.set_script(load("res://block.gd"))
-				_place_district_piece(b, Vector3(pos.x, 0.0, pos.z + 4.0), 1.0 + float(course) * 2.0, home_turtle)
+				add_child(b)
+				b.global_position = Vector3(pos.x, ground_y(pos.x, pos.z) + 1.0 + float(course) * 2.0, pos.z + 4.0)
 			var roof := StaticBody3D.new()
 			roof.set_script(BuildPieceScript)
 			roof.kind = BuildPieceScript.Kind.ROOF
-			_place_district_piece(roof, Vector3(pos.x, 0.0, pos.z + 4.0), 1.0 + 3.0 * 2.0, home_turtle)
+			add_child(roof)
+			roof.global_position = Vector3(pos.x, ground_y(pos.x, pos.z) + 1.0 + 3.0 * 2.0, pos.z + 4.0)
 		"Crafting":
 			# a workshop marker -- a single worked block, distinct from the
 			# raw wall material a fortress course uses.
 			var workshop := StaticBody3D.new()
 			workshop.set_script(load("res://block.gd"))
 			workshop.material_tier = maxi(1, material_tier)
-			_place_district_piece(workshop, Vector3(pos.x + 4.0, 0.0, pos.z), 1.0, home_turtle)
+			add_child(workshop)
+			workshop.global_position = Vector3(pos.x + 4.0, ground_y(pos.x + 4.0, pos.z) + 1.0, pos.z)
 			# REAL WORKSTATION (2026-07-19): "make sure both npc and player
 			# tribes are creating blacksmiths" -- a Crafting settlement now
 			# raises an actual named forge (blacksmith_forge.gd), not just an
@@ -800,23 +754,10 @@ func _build_district_structures(district: String, pos: Vector3, home_turtle = nu
 			# was always missing.
 			var forge := StaticBody3D.new()
 			forge.set_script(load("res://blacksmith_forge.gd"))
-			_place_district_piece(forge, Vector3(pos.x - 4.0, 0.0, pos.z), 1.0, home_turtle)
+			add_child(forge)
+			forge.global_position = Vector3(pos.x - 4.0, ground_y(pos.x - 4.0, pos.z) + 1.0, pos.z)
 		"Gathering":
 			pass   # the extra teepee above IS gathering's own distinct structure
-
-## Shared placement for every district structure above: on a turtle, parent
-## onto it with a LOCAL offset (deck_height() + the piece's own height above
-## the deck) so it travels with the island's drift; off turtle-islands mode
-## (or no turtle actually under this spot), fall back to the old
-## ground_y()-seated global position.
-func _place_district_piece(piece: Node3D, xz_pos: Vector3, height_above_ground: float, home_turtle = null) -> void:
-	if home_turtle != null:
-		home_turtle.add_child(piece)
-		var local: Vector3 = xz_pos - home_turtle.global_position
-		piece.position = Vector3(local.x, home_turtle.deck_height() + height_above_ground, local.z)
-	else:
-		add_child(piece)
-		piece.global_position = Vector3(xz_pos.x, ground_y(xz_pos.x, xz_pos.z) + height_above_ground, xz_pos.z)
 
 const DISTRICT_TYPES := ["Watch", "Gathering", "Crafting"]
 const WATCH_SIGHT_BONUS := 1.3   # a lookout tower genuinely extends how far residents see
@@ -1077,45 +1018,9 @@ var terrain: Node3D = null   # TerrainGen, if enabled — the ground everything 
 ## Ground height at world x,z. The ONE place spawn code asks "where's the
 ## surface here". Returns 0 with no terrain, so the flat-world path is unchanged.
 func ground_y(x: float, z: float) -> float:
-	if turtle_islands:
-		# TURTLE ISLANDS: there's no static land anymore (terrain is pure
-		# ocean -- see terrain_gen.gd's all_ocean), so "ground" here means
-		# whichever turtle's own surface is closest, or the open sea surface
-		# if nothing is near. Without this, every caller that still asks
-		# ground_y for "a safe height to stand/seat something at" (envoy
-		# pathing, respawn-on-death, ...) would place things at the seafloor,
-		# underwater.
-		if player_island != null and is_instance_valid(player_island) \
-				and player_island.has_method("is_on_turtle") and player_island.is_on_turtle(x, z):
-			# BUG FIX (2026-07-28): this returned the turtle's ROOT y (==
-			# water_level), not its actual deck surface -- every caller of
-			# "where's the ground here" (respawn, envoy pathing, ...) was
-			# seating things at/below the waterline instead of on the shell.
-			return player_island.global_position.y + player_island.deck_height()
-		for t in world_tribes:
-			if is_instance_valid(t) and bool(t.get("is_turtle")) and t.has_method("is_on_turtle") and t.is_on_turtle(x, z):
-				return t.global_position.y + t.deck_height()
-		return terrain.water_level if (terrain != null and is_instance_valid(terrain)) else 10.0
 	if terrain != null and is_instance_valid(terrain) and terrain.has_method("height_at"):
 		return terrain.height_at(x, z)
 	return 0.0
-
-## Whichever turtle (player's own island, or a rival's) currently has (x,z)
-## over its footprint, or null if nothing's there (open water, or turtle mode
-## is off). The same "who's under this spot" query FPSPlayer.gd's own
-## _update_turtle_weld() already does -- pulled out here so any NEW structure
-## that needs to attach to a turtle (outposts, district buildings) doesn't
-## have to duplicate that scan.
-func _turtle_at(x: float, z: float):
-	if not turtle_islands:
-		return null
-	if player_island != null and is_instance_valid(player_island) \
-			and player_island.has_method("is_on_turtle") and player_island.is_on_turtle(x, z):
-		return player_island
-	for t in world_tribes:
-		if is_instance_valid(t) and bool(t.get("is_turtle")) and t.has_method("is_on_turtle") and t.is_on_turtle(x, z):
-			return t
-	return null
 
 ## Public passthrough so other scripts (e.g. animal.gd wandering) can keep off the
 ## ocean without reaching into the untyped `terrain` var themselves. False with no
@@ -1151,48 +1056,31 @@ func _spawn_world() -> void:
 	# height they walk it without any other change. Only SPAWNING assumed a flat
 	# plane, and that funnels through _scatter().
 	_build_terrain()
-	# BUG FIX (2026-07-27): "still no trees on turtles" -- _spawn_tree_field()
-	# used to be gated behind `not turtle_islands` along with the rest of the
-	# ambient wilderness scatter below, on the reasoning that turtle islands
-	# don't need a map-wide forest. True, but wrong place to gate it: each
-	# island's own resource grove (world_tribe.gd's _spawn_resource_grove()/
-	# _tick_local_resources()) ALSO spawns real tree.gd nodes onto the
-	# turtle -- and tree.gd itself renders NOTHING on its own (the whole
-	# MultiMesh-batching design, see tree_field.gd's header): it just calls
-	# mark_dirty() on whatever tree_field is in the "tree_field" group. With
-	# tree_field never spawned in turtle mode, every turtle-island tree was a
-	# real, gameplay-tracked, chop-able, completely INVISIBLE position record.
-	# tree_field.gd must exist regardless of turtle_islands; only the AMBIENT
-	# wilderness-wide scatter below (a map you can't walk across as open land
-	# anyway) stays turtle-gated.
+	# One MultiMeshInstance3D PER SPECIES (tree_field.gd) draws the whole forest --
+	# 5 real-model batches + a procedural fallback batch, a handful of draw calls
+	# instead of one per tree. Built before any tree spawns so each tree's
+	# mark_dirty() has a field to notify. Every tree.gd node is now an invisible
+	# gameplay record; the field draws them all.
 	_spawn_tree_field()
-
-	# TURTLE ISLANDS: skip the rest of the AMBIENT wilderness spawn below --
-	# there's no open land left to scatter berries/game/minerals/wanderers
-	# across (terrain is pure ocean now, see terrain_gen.gd's all_ocean).
-	# Each island already gets its own local resources via world_tribe.gd's
-	# _spawn_resource_grove()/_tick_local_resources(), and the player gathers
-	# via direct interaction, not ambient world scatter.
-	if not turtle_islands:
-		_spawn_vegetation()
-		# BERRIES grow in the low, wet ground -- valleys and plains, not on bare rock.
-		for _i in range(bush_count):
-			var b = Node3D.new()
-			b.set_script(load("res://food_source.gd"))
-			b.set("species", BUSH_POOL[randi() % BUSH_POOL.size()])   # must be set before add_child -- _ready() reads it immediately
-			add_child(b)
-			b.position = _scatter_biome(6.0, RESOURCE_EXTENT, 0.0, ["valley", "plains"])
-		# GAME roams the open plains and valleys, not the peaks.
-		for _i in range(animal_count):
-			_spawn_animal(_scatter_biome(10.0, RESOURCE_EXTENT, 1.0, ["valley", "plains", "highland"]))
-		# MINERALS -- stone, ore, gems -- are quarried from the highlands and
-		# mountains. New biome-specific resource; see mineral.gd.
-		_spawn_minerals()
-		for _i in range(neutral_count):
-			# spread across the whole map, not clustered just outside your camp —
-			# wanderers should feel like they're out in the world, same range
-			# rival tribe camps use, not bunched at the inner edge of RESOURCE_EXTENT
-			_spawn_neutral(_scatter(30.0, MAP_EXTENT, 1.0))
+	_spawn_vegetation()
+	# BERRIES grow in the low, wet ground -- valleys and plains, not on bare rock.
+	for _i in range(bush_count):
+		var b = Node3D.new()
+		b.set_script(load("res://food_source.gd"))
+		b.set("species", BUSH_POOL[randi() % BUSH_POOL.size()])   # must be set before add_child -- _ready() reads it immediately
+		add_child(b)
+		b.position = _scatter_biome(6.0, RESOURCE_EXTENT, 0.0, ["valley", "plains"])
+	# GAME roams the open plains and valleys, not the peaks.
+	for _i in range(animal_count):
+		_spawn_animal(_scatter_biome(10.0, RESOURCE_EXTENT, 1.0, ["valley", "plains", "highland"]))
+	# MINERALS -- stone, ore, gems -- are quarried from the highlands and
+	# mountains. New biome-specific resource; see mineral.gd.
+	_spawn_minerals()
+	for _i in range(neutral_count):
+		# spread across the whole map, not clustered just outside your camp —
+		# wanderers should feel like they're out in the world, same range
+		# rival tribe camps use, not bunched at the inner edge of RESOURCE_EXTENT
+		_spawn_neutral(_scatter(30.0, MAP_EXTENT, 1.0))
 	_spawn_world_tribes()
 
 func _spawn_minerals() -> void:
@@ -1289,25 +1177,10 @@ func _spawn_neutral(pos: Vector3) -> void:
 
 func _spawn_world_tribes() -> void:
 	var placed: Array      = []
-	# SPACING FIX (2026-07-27): "too many turtles spawning close together" --
-	# `placed_radii` runs parallel to `placed` so each pair's real contact
-	# distance (radius + radius + margin) can be checked, instead of the old
-	# flat 40.0 constant, which was even SMALLER than two rivals' actual
-	# shell-contact distance (44.8) and didn't consider the player's much
-	# bigger 45-radius island at all. Seed with the player's own island so
-	# rivals get real clearance from it too -- previously `placed` only ever
-	# tracked OTHER rivals, so a rival could spawn as close as 34 units from
-	# the origin, well inside the player's own island, with zero check
-	# against it. See _find_turtle_spot()'s own per-pair fix below.
-	var placed_radii: Array = []
-	if turtle_islands and player_island != null and is_instance_valid(player_island):
-		placed.append(Vector3.ZERO)
-		placed_radii.append(float(player_island.get("turtle_radius")))
 	var used_names: Dictionary = {}
 	for i in range(world_tribe_count):
-		var pos: Vector3 = _find_turtle_spot(placed, placed_radii) if turtle_islands else _find_camp_spot(placed)
+		var pos: Vector3 = _find_camp_spot(placed)
 		placed.append(pos)
-		placed_radii.append(RIVAL_TURTLE_RADIUS)
 		var hue  := fmod(float(i) / float(world_tribe_count) + randf() * 0.04, 1.0)
 		var col  := Color.from_hsv(hue, 0.65, 0.95)
 		var arch : String = ARCHETYPES[i % ARCHETYPES.size()]
@@ -1318,78 +1191,11 @@ func _spawn_world_tribes() -> void:
 		var wt    = Node3D.new()
 		wt.set_script(load("res://world_tribe.gd"))
 		add_child(wt)
-		# is_turtle must be set BEFORE setup() runs -- setup() calls
-		# _level_camp_ground() at the end, which reads is_turtle to skip the
-		# ground-flatten/snap that only makes sense for a static land camp.
-		wt.is_turtle = turtle_islands
 		wt.global_position = pos
 		wt.setup(nm, col, arch, _start_size, self)
 		wt.member_cap = _tribe_cap
 		world_tribes.append(wt)
-		# TROLL-GUARDED ISLANDS (Phase 6): roughly 1 in 4 turtle islands gets a
-		# guardian at its edge -- the "one approach point" from the Odysseus/
-		# Cyclops brief. Positioned as a CHILD of the turtle so it rides along
-		# for free, same trick every other camp structure already uses.
-		if turtle_islands and wt.turtle_radius > 0.0 and randf() < 0.25:
-			var troll = CharacterBody3D.new()
-			troll.set_script(load("res://troll.gd"))
-			troll.home_tribe = wt
-			# local Y=0.0 planted the troll inside the shell's own solid
-			# collision once TURTLE_FREEBOARD was raised -- see world_tribe.gd's
-			# _make_npc()/_local_resource_local_offset() for the same fix.
-			troll.position = Vector3(wt.turtle_radius * 0.75, wt.deck_height(), 0.0)
-			wt.add_child(troll)
-			wt.has_troll = true
 	print("World: spawned %d tribes" % world_tribes.size())
-
-## Turtle-mode equivalent of _find_camp_spot(): scatters across OPEN WATER
-## instead of dry land (the inverse land-gate), and seats the spawn at the
-## water's surface (water_level), not the seafloor's ground_y -- a turtle
-## floats, it doesn't stand on the bottom. Falls back to a random water-ish
-## point if the map is too crowded to find one respecting each candidate's
-## real per-pair spacing requirement.
-# SPACING FIX (2026-07-27): territory_radius never varies per archetype/scale
-# (see world_tribe.gd), so every rival's turtle_radius is this exact fixed
-# value (16.0 * 1.4) -- safe to hardcode rather than guess at spawn time,
-# before the new tribe's own setup() has even run.
-const RIVAL_TURTLE_RADIUS := 67.2   # 3x (was 22.4) -- kept in sync with world_tribe.gd's territory_radius(48.0) * 1.4
-const TURTLE_SPACING_MARGIN := 12.0   # kept in sync with world_tribe.gd's own const of the same name
-
-func _find_turtle_spot(placed: Array, placed_radii: Array) -> Vector3:
-	var wl: float = 10.0
-	if terrain != null and is_instance_valid(terrain):
-		wl = float(terrain.get("water_level"))
-	if terrain == null or not is_instance_valid(terrain) or not terrain.has_method("is_water"):
-		# no terrain at all -- shouldn't happen since _build_terrain() forces
-		# island_mode on whenever turtle_islands is true, but fall back to the
-		# old land-based spot rather than spawn at an unseated (0, wl, 0).
-		return _find_camp_spot(placed)
-	for _try in range(40):
-		var ang := randf() * TAU
-		var r := randf_range(34.0, MAP_EXTENT)
-		var x := cos(ang) * r
-		var z := sin(ang) * r
-		if not terrain.is_water(x, z):
-			continue
-		var ok := true
-		for j in range(placed.size()):
-			var q: Vector3 = placed[j]
-			var need: float = RIVAL_TURTLE_RADIUS + float(placed_radii[j]) + TURTLE_SPACING_MARGIN
-			if Vector2(x - q.x, z - q.z).length() < need:
-				ok = false
-				break
-		if not ok:
-			continue
-		return Vector3(x, wl, z)
-	# crowded map fallback: still return SOME open-water spot rather than fail
-	for _try in range(20):
-		var fang := randf() * TAU
-		var fr := randf_range(34.0, MAP_EXTENT)
-		var fx := cos(fang) * fr
-		var fz := sin(fang) * fr
-		if terrain.is_water(fx, fz):
-			return Vector3(fx, wl, fz)
-	return Vector3(0.0, wl, MAP_EXTENT * 0.5)   # last resort, extremely unlikely to be reached
 
 func _find_camp_spot(placed: Array) -> Vector3:
 	# Prefer FLAT ground. A camp on a hillside can't be fully levelled without
@@ -1443,17 +1249,7 @@ func _unique_tribe_name(used: Dictionary) -> String:
 		randi() % 99,
 	]
 
-## BUG FIX (2026-07-27): "animals aren't stuck to the islands" -- unlike the
-## tree/food_source spawners in world_tribe.gd, this never had an is_turtle
-## branch at all: every animal, from every caller, always became a sibling of
-## the Tribemanager itself. A turtle-owned animal parented that way has no
-## island transform to inherit, so it just sits at its fixed spawn point in
-## open water once the island drifts away from under it. `home_turtle`, when
-## given, makes this animal a CHILD of that turtle instead (in which case
-## `pos` must already be a LOCAL offset, not a world position -- see
-## world_tribe.gd's _local_resource_local_offset()) so it rides along for
-## free exactly like every other camp structure already does.
-func _spawn_animal(pos: Vector3, home_turtle = null) -> void:
+func _spawn_animal(pos: Vector3) -> void:
 	# species AND position must be set BEFORE add_child() — animal.gd's
 	# _ready() (which fires the instant add_child runs) reads species to
 	# pick stats and captures home_pos = global_position immediately, so
@@ -1463,10 +1259,7 @@ func _spawn_animal(pos: Vector3, home_turtle = null) -> void:
 	a.set_script(load("res://animal.gd"))
 	a.set("species", ANIMAL_POOL[randi() % ANIMAL_POOL.size()])
 	a.position = pos
-	if home_turtle != null and is_instance_valid(home_turtle):
-		home_turtle.add_child(a)
-	else:
-		add_child(a)
+	add_child(a)
 
 ## Nudge (x,z) onto dry land. Returns the ground-seated position if it's already
 ## land (or island_mode is off / no terrain), else the nearest shore via the
@@ -1563,16 +1356,7 @@ func far_shore(embark: Vector3, to: Vector3) -> Vector3:
 			return Vector3(px, ground_y(px, pz), pz)
 	# never re-landed on the march -> snap to the nearest shore by the target
 	var nl: Vector3 = terrain.nearest_land(to.x, to.z, 240.0)
-	if nl != Vector3.INF:
-		return nl
-	# TURTLE ISLANDS: nearest_land() can never succeed here -- terrain is pure
-	# ocean, there IS no static shore anywhere (see terrain_gen.gd's
-	# all_ocean). `to` is itself a turtle's own position, so land directly
-	# there (ground_y is turtle-aware -- see its own comment) instead of
-	# aborting the whole crossing.
-	if turtle_islands:
-		return Vector3(to.x, ground_y(to.x, to.z), to.z)
-	return Vector3.INF
+	return nl
 
 func _scatter(min_r: float, max_r: float, y: float) -> Vector3:
 	# In island mode a raw (x,z) can land in the ocean; _land_spot nudges it to the
@@ -1623,60 +1407,15 @@ func _build_terrain() -> void:
 	terrain.set_script(tscript)
 	add_child(terrain)
 	# ISLANDS: large scales (Epic/Massive) become archipelagos, small ones stay a
-	# single continuous landmass -- UNLESS turtle_islands is on, which forces
-	# ocean/island terrain on every scale (every tribe needs open water to drift
-	# on). Must be set BEFORE generate() -- the generator reads island_mode to
-	# decide land-vs-ocean. When off, is_land() is true everywhere and every
-	# land-gate below is a no-op, so small maps are unchanged.
-	var islands: bool = turtle_islands or bool(SCALE_PRESETS[game_scale].get("islands", false))
+	# single continuous landmass. Must be set BEFORE generate() -- the generator
+	# reads island_mode to decide land-vs-ocean. When off, is_land() is true
+	# everywhere and every land-gate below is a no-op, so small maps are unchanged.
+	var islands: bool = bool(SCALE_PRESETS[game_scale].get("islands", false))
 	terrain.island_mode = islands
-	# TURTLE ISLANDS (2026-07-25): no static land ANYWHERE -- the old
-	# continentalness landmasses + the forced "home island" at the origin both
-	# used to coexist with player_island.gd's own turtle body at that same
-	# spot, which is exactly why it looked broken (a real static hill AND a
-	# floating shell stacked on top of each other, with mismatched heights).
-	# Every landmass now IS a turtle; see terrain_gen.gd's all_ocean.
-	terrain.all_ocean = turtle_islands
 	terrain.generate(MAP_EXTENT, _terrain_seed)
 	# the old flat plane would z-fight the terrain at valley floors and collide as
 	# a false floor -- retire it now that the terrain is the ground.
 	_disable_flat_floor()
-
-	if turtle_islands and player_island != null and is_instance_valid(player_island):
-		# SEAT THE PLAYER'S ISLAND AT SEA LEVEL -- it was placed at Vector3.ZERO
-		# in _spawn_stockpile() (before terrain existed to ask water_level of),
-		# which put its turtle shell at world y=0 instead of the water surface
-		# every rival turtle actually floats at (see Tribemanager._find_turtle_spot()).
-		player_island.global_position.y = terrain.water_level
-		# lift the player and their starting tribe onto the ISLAND's own deck,
-		# not the terrain's ground_y -- there IS no terrain ground here anymore
-		# (all_ocean means ground_y is deep seafloor, underwater).
-		var pl := get_tree().get_first_node_in_group("player") as Node3D
-		# BUG FIX (2026-07-28): "i spawn under turtle shell" / "fall through" --
-		# this used to be a flat +1.5, which only cleared the shell's crest back
-		# when TURTLE_FREEBOARD was 1.2. Raising the freeboard to make the shell
-		# read as more above water (deck_height() below) left the old +1.5
-		# spawning the player and every member INSIDE the shell's own solid
-		# collision cylinder instead of on top of it.
-		var deck: float = float(player_island.deck_height())
-		if pl:
-			pl.global_position = Vector3(player_island.global_position.x,
-				player_island.global_position.y + deck, player_island.global_position.z)
-			for i in range(members.size()):
-				var mem = members[i]
-				if not (is_instance_valid(mem) and mem is Node3D):
-					continue
-				var a := TAU * float(i) / float(maxi(1, members.size()))
-				var mx: float = pl.global_position.x + cos(a) * 3.0
-				var mz: float = pl.global_position.z + sin(a) * 3.0
-				mem.global_position = Vector3(mx, player_island.global_position.y + deck, mz)
-				if "home_pos" in mem:
-					mem.home_pos = mem.global_position
-		# the stockpile/campfire are already parented onto player_island with a
-		# LOCAL offset (see _spawn_stockpile()/_spawn_campfire()) -- nothing
-		# further to seat; forcing their GLOBAL y to ground_y here (the old
-		# code below) would yank them back down to the seafloor.
-		return
 
 	# lift the player onto the surface so they don't spawn buried or fall through
 	# the moment the flat floor vanishes (they're near origin, in the flat basin,
@@ -1922,21 +1661,9 @@ func try_build_fence(pos: Vector3, yaw: float, by_player: bool = false) -> bool:
 	wood -= FENCE_COST
 	var f = StaticBody3D.new()
 	f.set_script(load("res://fence.gd"))
-	if player_island != null:
-		# TURTLE ISLANDS: same local-offset reparenting as try_build_teepee()/
-		# try_build_block() above.
-		player_island.add_child(f)
-		var local: Vector3 = pos - player_island.global_position
-		# BUG FIX (2026-07-28): hardcoded 0.0 assumed the deck sat right at the
-		# turtle's own local origin -- true at the old TURTLE_FREEBOARD (1.2),
-		# wrong now (4.0). local.y already carries the correct height, since
-		# `pos` is wherever the player was actually standing (now correctly
-		# seated on the deck -- see ground_y()'s matching fix).
-		f.position = Vector3(local.x, local.y, local.z)
-	else:
-		add_child(f)
-		pos.y = seat_build(pos.x, pos.z, 2.0)   # level the ground, sit the fence on it
-		f.global_position = pos
+	add_child(f)
+	pos.y = seat_build(pos.x, pos.z, 2.0)   # level the ground, sit the fence on it
+	f.global_position = pos
 	f.rotation.y      = yaw
 	notify_cat(CAT_YOU, "Fence raised. (wood left: %d)" % wood)
 	if not by_player: _track_fortress_piece(f)
@@ -1952,24 +1679,9 @@ func try_build_teepee(pos: Vector3, by_player: bool = false) -> bool:
 	wood -= TEEPEE_COST
 	var t = StaticBody3D.new()
 	t.set_script(load("res://teepee.gd"))
-	if player_island != null:
-		# TURTLE ISLANDS: parent onto the player's turtle with a LOCAL offset
-		# (captured from wherever they were standing when they built it)
-		# instead of a global, ground-seated position -- so it correctly
-		# keeps traveling with the island on every subsequent drift tick,
-		# regardless of when or where it was built.
-		player_island.add_child(t)
-		var local: Vector3 = pos - player_island.global_position
-		# BUG FIX (2026-07-28): the 2.5 lift (teepee.gd's own mesh pivot sits at
-		# its center, not its base) used to be measured from the turtle's local
-		# origin, which was fine when that was near the deck (old
-		# TURTLE_FREEBOARD 1.2) -- now local.y (the player's actual stance
-		# height, see ground_y()'s fix) is the real deck baseline to lift from.
-		t.position = Vector3(local.x, local.y + 2.5, local.z)
-	else:
-		add_child(t)
-		pos.y = seat_build(pos.x, pos.z, 2.5)
-		t.global_position = pos
+	add_child(t)
+	pos.y = seat_build(pos.x, pos.z, 2.5)
+	t.global_position = pos
 	notify_cat(CAT_YOU, "Teepee raised. (wood left: %d)" % wood)
 	if not by_player: _track_fortress_piece(t)
 	return true
@@ -2001,29 +1713,14 @@ func try_build_block(pos: Vector3, by_player: bool = false) -> bool:
 	var b = StaticBody3D.new()
 	b.set_script(load("res://block.gd"))
 	b.material_tier = material_tier
-	if player_island != null:
-		# TURTLE ISLANDS: same local-offset reparenting as try_build_teepee()
-		# above. pos.y is still the course height (1 = ground course, 3 =
-		# second course) -- now a LOCAL height on the turtle's own deck
-		# instead of an offset added to a global ground seat.
-		player_island.add_child(b)
-		var local: Vector3 = pos - player_island.global_position
-		var snapped_local: Vector3 = BlockScript.snap(Vector3(local.x, 0.0, local.z))
-		# BUG FIX (2026-07-28): this used pos.y directly, correct only when the
-		# deck sat right at the turtle's local origin (old TURTLE_FREEBOARD
-		# 1.2). pos.y now comes from FPSPlayer._stack_top(), which is
-		# ground_y()-based (turtle-aware) -- local.y already carries the right
-		# height once converted out of world space, same as try_build_fence().
-		b.position = Vector3(snapped_local.x, local.y, snapped_local.z)
-	else:
-		add_child(b)
-		# flatten the footprint, then stack the block ON the levelled ground: pos.y is
-		# the course height (1 = ground course, 3 = second course), added to the seat
-		# height so a wall built on a slope rises in even courses instead of floating.
-		var seat := seat_build(pos.x, pos.z, 1.4)
-		var snapped: Vector3 = BlockScript.snap(pos)
-		snapped.y = seat + pos.y
-		b.global_position = snapped
+	add_child(b)
+	# flatten the footprint, then stack the block ON the levelled ground: pos.y is
+	# the course height (1 = ground course, 3 = second course), added to the seat
+	# height so a wall built on a slope rises in even courses instead of floating.
+	var seat := seat_build(pos.x, pos.z, 1.4)
+	var snapped: Vector3 = BlockScript.snap(pos)
+	snapped.y = seat + pos.y
+	b.global_position = snapped
 	if not by_player: _track_fortress_piece(b)
 	return true
 
@@ -2817,19 +2514,6 @@ func _raid_tick(delta: float) -> void:
 		var sub := "  %d swear to your clan!" % joined if joined > 0 else ""
 		notify_cat(CAT_TRIBE, "RAID WON vs %s! +%d food, +%d skins. Camp razed.%s" % [
 			fallen_name, loot_f, loot_m, sub])
-		# turtle-island quest engine (Phase 3): "war/raid" quests (e.g. "tribe
-		# war", "scout enemy camp", "assassination") ask the player to do
-		# violence on the quest-giver's behalf, not necessarily against them
-		# specifically -- there's no per-quest "raid THIS target for THAT
-		# giver" attribution in the raid system today, so (like this game's
-		# existing AI-war dice-roll fallback) this abstracts to: any won
-		# player raid counts toward a war-type quest for every OTHER island
-		# that already trusts you at least a little.
-		for t in _live_world_tribes():
-			if t == target or not t.has_method("try_complete_quest_of_type"):
-				continue
-			if float(t.player_opinion) >= 0.0:
-				t.try_complete_quest_of_type("war")
 	else:
 		unrest += 0.5
 		for m in _raid["party"]:
@@ -2880,7 +2564,6 @@ func _process(delta: float) -> void:
 			_map_redraw_accum = 0.2
 			_update_map()
 	_check_proximity_discovery(delta)
-	_check_turtle_encounter(delta)
 
 	_dog_spawn_cd -= delta
 	if _dog_spawn_cd <= 0.0:
@@ -3558,11 +3241,6 @@ func _resolve_player_envoy(envoy: Node, host: Node) -> void:
 	TribeMemory.record_event("Trade: your tribe and %s" % host.tribe_name,
 		"Your envoy carried %d goods to the %s and returned with %d food." % [
 			mat_moved, host.tribe_name, food_moved], "trade")
-	# turtle-island quest engine (Phase 3): a successful player envoy delivery
-	# IS the real "escort a caravan" quest, so complete it here rather than
-	# building a parallel escort-tracking system.
-	if host.has_method("try_complete_quest_of_type"):
-		host.try_complete_quest_of_type("escort")
 
 # PLAYER ACTION — send a trade envoy to the nearest eligible rival, offering
 # material for food. Bound to a key in FPSPlayer.gd.
@@ -3583,8 +3261,6 @@ func trade_partners() -> Array:
 			continue
 		if float(t.player_opinion) <= -0.3:
 			continue
-		if t.has_method("troll_blocks_access") and t.troll_blocks_access():
-			continue   # guardian still stands -- no dock/trade until it falls
 		out.append({
 			"tribe": t,
 			"tribe_name": str(t.tribe_name),
@@ -4992,139 +4668,6 @@ func _check_proximity_discovery(delta: float) -> void:
 					t.tribe_name, t.archetype, t.strength,
 					"\n\"%s\"" % line if line != "" else ""])
 
-const UITheme = preload("res://ui_theme.gd")
-var _encounter_prompt_tribe = null
-var _encounter_check_accum: float = 0.0
-var _encounter_panel: PanelContainer = null
-var _encounter_title: Label = null
-var _encounter_sub: Label = null
-
-## Phase 5, turtle-island revamp: "friendly barter or conquer" is the whole
-## point of the revamp -- this is pure WIRING onto systems that already work
-## (propose_trade_with() -> the real envoy/trade-post flow; _launch_raid() ->
-## the real _raid_tick()/conquer() path), not new diplomacy or combat
-## mechanics. HARMONIOUS_WORLD/_check_victory() are untouched -- "no forced
-## winner" already covers what this needs.
-##
-## Trigger: physically standing ON a discovered turtle island (is_on_turtle()),
-## tighter and more deliberate than the walk-by discovery ping above. Shows
-## ONCE per landing -- _encounter_prompt_tribe only changes when the player
-## steps onto a DIFFERENT island (or off of one entirely), so standing still
-## on one island never re-spams the same prompt.
-func _check_turtle_encounter(delta: float) -> void:
-	_encounter_check_accum -= delta
-	if _encounter_check_accum > 0.0:
-		return
-	_encounter_check_accum = 0.5
-	var p := get_tree().get_first_node_in_group("player")
-	if p == null or not is_instance_valid(p):
-		return
-	var ppos: Vector3 = (p as Node3D).global_position
-	var found = null
-	for t in world_tribes:
-		if is_instance_valid(t) and not t.defeated and bool(t.get("is_turtle")) and bool(t.get("discovered")) \
-				and t.has_method("is_on_turtle") and t.is_on_turtle(ppos.x, ppos.z):
-			found = t
-			break
-	if found == _encounter_prompt_tribe:
-		return   # same state as last check (still on it, still off it) -- don't re-spam
-	_encounter_prompt_tribe = found
-	if found != null and found.has_method("troll_blocks_access") and found.troll_blocks_access():
-		# Phase 6: a guardian still stands -- no trade/raid choice until it
-		# falls (see troll.gd's _die() for the "the way is open" message).
-		notify_cat(CAT_TRIBES, "A guardian troll blocks the way onto the %s island." % str(found.tribe_name))
-		_hide_encounter_prompt()
-	elif found != null:
-		_show_encounter_prompt(found)
-	else:
-		_hide_encounter_prompt()
-
-func _show_encounter_prompt(t: Node) -> void:
-	if _encounter_panel == null:
-		_build_encounter_panel()
-	_encounter_panel.visible = true
-	_encounter_title.text = "island: %s (%s)" % [t.tribe_name, t.archetype]
-	var op: float = float(t.player_opinion)
-	var stance: String = "friendly" if op > 0.15 else ("wary" if op > -0.3 else "hostile")
-	var res_line: String = ""
-	if t.has_method("island_resources"):
-		var arr: Array = t.island_resources()
-		res_line = "  |  produces: %s" % ", ".join(arr.map(func(r): return str(r)))
-	_encounter_sub.text = "standing: %s%s" % [stance, res_line]
-
-func _hide_encounter_prompt() -> void:
-	if _encounter_panel != null:
-		_encounter_panel.visible = false
-
-func _build_encounter_panel() -> void:
-	var ui := _get_or_create_ui()
-	_encounter_panel = PanelContainer.new()
-	_encounter_panel.name = "TurtleEncounterPrompt"
-	var w := 420.0
-	var h := 150.0
-	_encounter_panel.custom_minimum_size = Vector2(w, h)
-	_encounter_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	_encounter_panel.offset_left = -w / 2.0
-	_encounter_panel.offset_right = w / 2.0
-	_encounter_panel.offset_top = -h - 60.0
-	_encounter_panel.offset_bottom = -60.0
-	UITheme.style_panel(_encounter_panel, UITheme.ACCENT_GOLD)
-	ui.add_child(_encounter_panel)
-
-	var vb := VBoxContainer.new()
-	vb.add_theme_constant_override("separation", 8)
-	_encounter_panel.add_child(vb)
-
-	_encounter_title = Label.new()
-	_encounter_title.add_theme_color_override("font_color", UITheme.ACCENT_GOLD)
-	_encounter_title.add_theme_font_size_override("font_size", 17)
-	vb.add_child(_encounter_title)
-
-	_encounter_sub = Label.new()
-	_encounter_sub.add_theme_color_override("font_color", UITheme.TEXT_MUTED)
-	_encounter_sub.add_theme_font_size_override("font_size", 12)
-	vb.add_child(_encounter_sub)
-	vb.add_child(UITheme.styled_separator())
-
-	var hb := HBoxContainer.new()
-	hb.add_theme_constant_override("separation", 10)
-	vb.add_child(hb)
-
-	var trade_btn := Button.new()
-	trade_btn.text = "Trade"
-	trade_btn.custom_minimum_size = Vector2(110, 30)
-	UITheme.style_button(trade_btn, UITheme.ACCENT_BLUE)
-	trade_btn.pressed.connect(_encounter_choose_trade)
-	hb.add_child(trade_btn)
-
-	var raid_btn := Button.new()
-	raid_btn.text = "Raid"
-	raid_btn.custom_minimum_size = Vector2(110, 30)
-	UITheme.style_button(raid_btn, UITheme.ACCENT_RED)
-	raid_btn.pressed.connect(_encounter_choose_raid)
-	hb.add_child(raid_btn)
-
-	var leave_btn := Button.new()
-	leave_btn.text = "Leave"
-	leave_btn.custom_minimum_size = Vector2(90, 30)
-	UITheme.style_button(leave_btn, UITheme.ACCENT_SAGE)
-	leave_btn.pressed.connect(_hide_encounter_prompt)
-	hb.add_child(leave_btn)
-
-func _encounter_choose_trade() -> void:
-	if _encounter_prompt_tribe == null or not is_instance_valid(_encounter_prompt_tribe):
-		_hide_encounter_prompt()
-		return
-	propose_trade_with(_encounter_prompt_tribe, 3)
-	_hide_encounter_prompt()
-
-func _encounter_choose_raid() -> void:
-	if _encounter_prompt_tribe == null or not is_instance_valid(_encounter_prompt_tribe):
-		_hide_encounter_prompt()
-		return
-	_launch_raid(_encounter_prompt_tribe)
-	_hide_encounter_prompt()
-
 func _toggle_ui() -> void:
 	_ui_hidden = not _ui_hidden
 	for l in [status_label, resource_label, help_label, player_label, factions_label]:
@@ -5328,23 +4871,15 @@ func apply_state(d: Dictionary) -> void:
 		var sp := Node3D.new()
 		sp.name = "OutpostStockpile"
 		sp.set_script(load("res://stockpile.gd"))
-		# same turtle-parenting fix as found_outpost() -- a reloaded outpost
-		# needs to reattach to whichever turtle is now under its saved (x,z),
-		# not become a fresh static structure adrift in open ocean.
-		var home_turtle = _turtle_at(ox, oz)
-		if home_turtle != null:
-			home_turtle.add_child(sp)
-			sp.position = opos - home_turtle.global_position
-		else:
-			add_child(sp)
-			sp.global_position = opos
+		add_child(sp)
+		sp.global_position = opos
 		sp.set("manager", self)
 		sp.set("settlement_name", str(os.get("name", "")))
 		sp.set("district", str(os.get("district", "")))
 		sp.remove_from_group("stockpile")
 		sp.add_to_group("outpost_stockpile")
 		outposts.append(sp)
-		_build_district_structures(str(os.get("district", "")), opos, home_turtle)
+		_build_district_structures(str(os.get("district", "")), opos)
 
 	# restore named members' bonds (they respawn generically on _start_game; here
 	# we re-apply who they were and how they felt about you)

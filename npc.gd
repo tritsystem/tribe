@@ -208,22 +208,10 @@ func _exit_tree() -> void:
 # instead of structures just appearing at the tribe's own position. ──
 var building: bool = false
 var _build_target: Vector3 = Vector3.ZERO
-# BUG FIX (2026-07-27): "buildings still in wrong spot" -- assign_build() used
-# to store _build_target as a bare world-space snapshot. On a turtle island
-# (drifting continuously) the camp moves out from under that fixed point
-# within seconds, so the builder walked toward and got stuck at an empty spot
-# in open water, and world_tribe.gd's own placement check (which recomputes
-# its target live off the tribe's CURRENT global_position, see
-# _build_palisade) never found the builder close enough -- the segment stayed
-# permanently claimed-but-unbuilt. Same stale-anchor bug already fixed for
-# npc.gd's `home` and tribemember.gd's `home_pos`; this is the third instance
-# of it, in the construction path specifically.
-var _build_offset: Vector3 = Vector3.ZERO
 
 func assign_build(pos: Vector3) -> void:
 	building = true
 	_build_target = pos
-	_build_offset = pos - (tribe.global_position if tribe != null and is_instance_valid(tribe) else Vector3.ZERO)
 
 func cancel_build() -> void:
 	building = false
@@ -811,91 +799,7 @@ func _brain_tick() -> void:
 		_flee_from = _player
 		if anim: anim.pop(0.6)       # spooked — a quick startle
 
-## TURTLE-ISLAND AWARENESS (2026-07-27): see tribemember.gd's own copy of
-## this same fix for the full reasoning (including two bugs found via a live
-## debug-teleport test: running the AI alongside the swim produces a stable
-## orbit, and swimming via move_and_slide() orbits too since the disc's
-## collision is a solid cylinder whose SIDE a horizontal swim collides with
-## and slides along, rather than crossing -- fixed by skipping the normal AI
-## entirely while swimming, and using a direct position write that climbs
-## toward the deck's height instead of move_and_slide()). `tribe` is already
-## this NPC's home turtle directly when it has one; neutrals (tribe == null)
-## fall back to whichever turtle they're actually nearest, resolved once and
-## cached (a per-frame scan across every world tribe would be a real cost at
-## Massive scale's 1000-tribe count).
-## BUG FIX (2026-07-27): "still trees and npcs not stuck to island" -- this
-## was a DIFFERENT bug than the swim-recovery above. `home` (the wander
-## anchor / territory-defense reference point) is a plain Vector3, set ONCE
-## in setup() from the tribe's position AT SPAWN TIME, then never touched
-## again. As the tribe's turtle drifted, `home` stayed frozen at the old
-## spot -- NPCs kept wandering/defending relative to an increasingly stale
-## point, actively walking AWAY from the actual (correctly parented, silently
-## drifting) camp rather than failing to follow it. Refreshed from the
-## tribe's LIVE position every frame, before anything downstream reads it.
 func _move(delta: float) -> void:
-	if tribe != null and is_instance_valid(tribe):
-		home = tribe.global_position
-		if building:
-			_build_target = tribe.global_position + _build_offset
-	if _turtle_swim_recovery(delta):
-		return
-	_move_impl(delta)
-
-const TURTLE_SWIM_SPEED := 3.5
-var _cached_home_turtle = null
-
-func _resolve_home_turtle():
-	if tribe != null:
-		return tribe
-	if _cached_home_turtle != null and is_instance_valid(_cached_home_turtle):
-		return _cached_home_turtle
-	var mgr = get_tree().get_first_node_in_group("tribe_manager")
-	if mgr == null:
-		return null
-	var best = null
-	var best_d := INF
-	var home = mgr.get("player_island")
-	if home != null and is_instance_valid(home):
-		best_d = Vector2(global_position.x - home.global_position.x, global_position.z - home.global_position.z).length()
-		best = home
-	if "world_tribes" in mgr:
-		for wt in mgr.world_tribes:
-			if wt == null or not is_instance_valid(wt):
-				continue
-			var d := Vector2(global_position.x - wt.global_position.x, global_position.z - wt.global_position.z).length()
-			if d < best_d:
-				best_d = d
-				best = wt
-	_cached_home_turtle = best
-	return best
-
-func _turtle_swim_recovery(delta: float) -> bool:
-	var mgr = get_tree().get_first_node_in_group("tribe_manager")
-	if mgr == null or not bool(mgr.get("turtle_islands")):
-		return false
-	var home_turtle = _resolve_home_turtle()
-	if home_turtle == null or not is_instance_valid(home_turtle):
-		return false
-	var r: float = float(home_turtle.get("turtle_radius"))
-	if r <= 0.0:
-		return false
-	var away: Vector3 = global_position - home_turtle.global_position
-	away.y = 0.0
-	var d := away.length()
-	if d <= r - 2.0:
-		return false   # safely on the disc -- normal AI movement applies
-	var dir: Vector3 = -away.normalized() if d > 0.01 else Vector3.FORWARD
-	global_position.x += dir.x * TURTLE_SWIM_SPEED * delta
-	global_position.z += dir.z * TURTLE_SWIM_SPEED * delta
-	# BUG FIX (2026-07-28): stop duplicating TURTLE_FREEBOARD as a local
-	# constant -- it drifted out of sync the moment the real one
-	# (turtle_island.gd) got retuned. Ask the turtle itself instead.
-	var deck_y: float = home_turtle.global_position.y + float(home_turtle.deck_height()) + 0.5
-	global_position.y = move_toward(global_position.y, deck_y, 2.5 * delta)
-	velocity = Vector3.ZERO
-	return true
-
-func _move_impl(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= gravity * delta
 	else:

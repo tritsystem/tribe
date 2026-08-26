@@ -1,6 +1,0 @@
-[gd_scene load_steps=2 format=3]
-
-[ext_resource type="Script" path="res://test_build_target_drift_weld.gd" id="1"]
-
-[node name="TestBuildTargetDriftWeld" type="Node"]
-script = ExtResource("1")

@@ -38,16 +38,6 @@ var max_height: float = 70.0     # tallest mountain above the base plane
 # is wired in Tribemanager -- turning the ground into ocean without that would
 # drop tribes and trees into the sea.
 var island_mode: bool = false
-# TURTLE ISLANDS (2026-07-25): when every landmass is a turtle's own moving
-# body (see world_tribe.gd/player_island.gd's _build_turtle_body()), the
-# terrain itself must be PURE ocean -- no continentalness-noise landmasses,
-# no forced "home island" at the origin. Both of those used to coexist with
-# the turtle bodies, which is exactly why the player's own island looked
-# broken: player_island.gd's shell floated at water_level while the terrain
-# ALSO threw a real, static hill up under it at the same spot. Set by
-# Tribemanager._build_terrain() only when turtle_islands is on; the old
-# archipelago behavior (large SCALE_PRESETS without turtles) is untouched.
-var all_ocean: bool = false
 var water_level: float = 10.0    # sea surface; terrain below it is underwater
 var seafloor: float = -9.0       # how deep the ocean floor sits below water_level
 const SEA_THRESHOLD := 0.46      # continentalness above this = land
@@ -125,12 +115,7 @@ func generate(world_extent: float, seed_val: int) -> void:
 			center_flat = center_flat * center_flat * (3.0 - 2.0 * center_flat)
 
 			var hv: float
-			if all_ocean:
-				# turtle-island mode: no static land ANYWHERE, not even the old
-				# forced home island -- every landmass in this mode is a turtle's
-				# own moving body (see the class comment above), not terrain.
-				hv = seafloor
-			elif island_mode:
+			if island_mode:
 				# continentalness 0..1; force a home island around origin so the
 				# player never starts at sea
 				var c := (_continent.get_noise_2d(wx, wz) + 1.0) * 0.5
@@ -175,8 +160,6 @@ func height_at(x: float, z: float) -> float:
 ## when island_mode is off (no water exists). The small margin keeps things off
 ## the exact waterline.
 func is_land(x: float, z: float) -> bool:
-	if all_ocean:
-		return false   # the only "land" in this mode is a turtle's own body, not terrain
 	if not island_mode:
 		return true
 	return height_at(x, z) > water_level + 0.5

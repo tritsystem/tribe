@@ -453,74 +453,7 @@ func _nearest_threat() -> Node3D:
 					best = n
 	return best
 
-## TURTLE-ISLAND AWARENESS (2026-07-27): see tribemember.gd's own copy of this
-## fix for the full reasoning (including two bugs found via a live
-## debug-teleport test: running the AI alongside the swim produces a stable
-## orbit, and swimming via move_and_slide() orbits too since the disc's
-## collision is a solid cylinder whose SIDE a horizontal swim collides with
-## and slides along rather than crossing -- fixed by skipping the normal AI
-## entirely while swimming, and using a direct position write that climbs
-## toward the deck's height instead of move_and_slide()). Animals have no
-## owning tribe, so their home turtle is resolved once (nearest to home_pos,
-## the land-gated spawn anchor) and cached -- not rescanned every frame.
 func _move(delta: float) -> void:
-	if _turtle_swim_recovery(delta):
-		return
-	_move_impl(delta)
-
-const TURTLE_SWIM_SPEED := 3.5
-var _cached_home_turtle = null
-
-func _resolve_home_turtle():
-	if _cached_home_turtle != null and is_instance_valid(_cached_home_turtle):
-		return _cached_home_turtle
-	var mgr = get_tree().get_first_node_in_group("tribe_manager")
-	if mgr == null:
-		return null
-	var best = null
-	var best_d := INF
-	var home = mgr.get("player_island")
-	if home != null and is_instance_valid(home):
-		best_d = Vector2(home_pos.x - home.global_position.x, home_pos.z - home.global_position.z).length()
-		best = home
-	if "world_tribes" in mgr:
-		for wt in mgr.world_tribes:
-			if wt == null or not is_instance_valid(wt):
-				continue
-			var d := Vector2(home_pos.x - wt.global_position.x, home_pos.z - wt.global_position.z).length()
-			if d < best_d:
-				best_d = d
-				best = wt
-	_cached_home_turtle = best
-	return best
-
-func _turtle_swim_recovery(delta: float) -> bool:
-	var mgr = get_tree().get_first_node_in_group("tribe_manager")
-	if mgr == null or not bool(mgr.get("turtle_islands")):
-		return false
-	var home_turtle = _resolve_home_turtle()
-	if home_turtle == null or not is_instance_valid(home_turtle):
-		return false
-	var r: float = float(home_turtle.get("turtle_radius"))
-	if r <= 0.0:
-		return false
-	var away: Vector3 = global_position - home_turtle.global_position
-	away.y = 0.0
-	var d := away.length()
-	if d <= r - 2.0:
-		return false   # safely on the disc -- normal AI movement applies
-	var dir: Vector3 = -away.normalized() if d > 0.01 else Vector3.FORWARD
-	global_position.x += dir.x * TURTLE_SWIM_SPEED * delta
-	global_position.z += dir.z * TURTLE_SWIM_SPEED * delta
-	# BUG FIX (2026-07-28): stop duplicating TURTLE_FREEBOARD as a local
-	# constant -- it drifted out of sync the moment the real one
-	# (turtle_island.gd) got retuned. Ask the turtle itself instead.
-	var deck_y: float = home_turtle.global_position.y + float(home_turtle.deck_height()) + 0.5
-	global_position.y = move_toward(global_position.y, deck_y, 2.5 * delta)
-	velocity = Vector3.ZERO
-	return true
-
-func _move_impl(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= gravity * delta
 	else:
@@ -572,22 +505,8 @@ func _wander(delta: float) -> void:
 		# but a wander step could wade into the ocean where they'd walk the
 		# seafloor. On island maps, reject a watery target and just stay put by
 		# home this cycle -- animals graze the land, they don't swim.
-		# BUG FIX (2026-07-27): in turtle_islands mode the underlying terrain is
-		# PURE ocean everywhere (see terrain_gen.gd's all_ocean) -- this check
-		# used to ask the STATIC TERRAIN "is this water?", which is
-		# unconditionally true both off a turtle's disc AND on it (turtles
-		# aren't part of the terrain heightmap), so it rejected nothing useful.
-		# Ask the home TURTLE instead: still inside its disc, or not.
 		var mgr = get_tree().get_first_node_in_group("tribe_manager")
-		var still_on_turtle := true
-		if mgr != null and bool(mgr.get("turtle_islands")):
-			var home_turtle = _resolve_home_turtle()
-			still_on_turtle = home_turtle != null and is_instance_valid(home_turtle) \
-				and home_turtle.has_method("is_on_turtle") \
-				and home_turtle.is_on_turtle(_wander_target.x, _wander_target.z)
-		elif mgr != null and mgr.has_method("terrain_is_water") and mgr.terrain_is_water(_wander_target.x, _wander_target.z):
-			still_on_turtle = false
-		if not still_on_turtle:
+		if mgr != null and mgr.has_method("terrain_is_water") and mgr.terrain_is_water(_wander_target.x, _wander_target.z):
 			_wander_target = home_pos
 		_wander_pause = randf_range(0.8, 2.5)
 		_halt()
