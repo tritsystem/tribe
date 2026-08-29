@@ -33,6 +33,13 @@ var flee_speed: float = 2.4
 var food_yield: int = 2
 var skins_yield: int = 1
 
+# ── ANIMAL MEMORY (2026-08-28): "remembers where food is found, develops a
+# preferred biome" -- see animal_memory.gd. Per-individual, in-session only
+# (see the honest scope note there re: why this isn't persisted to disk).
+const AnimalMemoryScript = preload("res://animal_memory.gd")
+var memory: AnimalMemory = AnimalMemoryScript.new()
+var _graze_memory_cd: float = 0.0   # throttle: don't spam on_graze_success every physics frame while grazing
+
 # DIVERSITY PASS (2026-07-19): "10x the diversity of animals" -- was 3
 # species. Same stat shape (color/scale/wander/flee/sense/food/skins/
 # threat_w), just more of them, spanning a real range from jumpy/low-yield
@@ -481,6 +488,19 @@ func _move(delta: float) -> void:
 				_face(bush.global_position, delta)
 				if bush.has_method("graze"):
 					bush.graze(delta)
+					# ANIMAL MEMORY: a real successful graze -- record biome +
+					# spot. Throttled to a few times a second, not every
+					# physics frame, since grazing holds this branch for the
+					# whole _graze_timer duration.
+					_graze_memory_cd -= delta
+					if _graze_memory_cd <= 0.0:
+						_graze_memory_cd = 0.5
+						var mgr = get_tree().get_first_node_in_group("tribe_manager")
+						var terrain = mgr.get("terrain") if mgr != null else null
+						var biome := "plains"
+						if terrain != null and terrain.has_method("biome_at"):
+							biome = str(terrain.biome_at(global_position.x, global_position.z))
+						memory.on_graze_success(biome, global_position)
 		else:
 			_wander(delta)
 	else:
@@ -497,6 +517,18 @@ func _wander(delta: float) -> void:
 	var d := global_position - _wander_target
 	d.y = 0.0
 	if d.length() <= ARRIVE:
+		# ANIMAL MEMORY: bias the next wander target toward a remembered
+		# food spot some of the time -- a real behavioral change, not just
+		# data collection. Not every time (a memory-driven animal should
+		# still browse locally, not beeline to the same spot forever).
+		if memory.has_memory() and randf() < 0.35:
+			var recalled: Vector3 = memory.recall_food_spot()
+			if recalled != Vector3.INF:
+				_wander_target = recalled + Vector3(randf_range(-2.0, 2.0), 0, randf_range(-2.0, 2.0))
+				_wander_target.y = home_pos.y
+				_wander_pause = randf_range(0.8, 2.5)
+				_halt()
+				return
 		var ang := randf() * TAU
 		var r := randf() * 8.0
 		_wander_target = home_pos + Vector3(cos(ang), 0, sin(ang)) * r
