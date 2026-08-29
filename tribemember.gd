@@ -566,6 +566,7 @@ const WEAPON_TIERS := [
 	{"name": "Spear", "mult": 1.4},
 	{"name": "Bow",   "mult": 1.6},
 	{"name": "Axe",   "mult": 1.8},
+	{"name": "Wand",  "mult": 1.3},
 ]
 const ARMOR_TIERS := [
 	{"name": "None",  "reduction": 0.0},
@@ -1910,6 +1911,63 @@ func _try_throw_at(foe) -> bool:
 	if foe.has_method("take_hit"):
 		foe.take_hit(dmg, self)
 		weapon_pref.on_combat_success(0)   # club-throw is always the Club type, regardless of equipped weapon tier
+	return true
+
+# ── BOW (2026-08-28): a member with WEAPON_TIERS[2] "Bow" equipped fires a
+# real physical arrow (tribe_arrow.gd) at range, instead of relying on the
+# club-throw path above (which is gated on the shared club stock, a
+# different resource). Longer range than THROW_RANGE, no ammo cost -- an
+# equipped bow is the resource, matching how equipped armor has no per-use
+# cost either.
+const BOW_RANGE := 14.0
+var _bow_cd: float = 0.0
+func _try_shoot_arrow_at(foe) -> bool:
+	if weapon != 2:   # WEAPON_TIERS index 2 == "Bow"
+		return false
+	if _bow_cd > 0.0 or foe == null or not is_instance_valid(foe):
+		return false
+	_bow_cd = 1.4
+	var f := (foe as Node3D).global_position - global_position
+	f.y = 0.0
+	if f.length() < 0.01:
+		return false
+	rotation.y = lerp_angle(rotation.y, atan2(f.x, f.z), 0.5)
+	var dmg := 6.0 + float(get_might()) * 0.7
+	dmg *= weapon_mult()
+	var arrow = load("res://tribe_arrow.gd").new()
+	get_tree().current_scene.add_child(arrow)
+	var origin: Vector3 = global_position + Vector3.UP * 1.3
+	var dir: Vector3 = ((foe as Node3D).global_position + Vector3.UP * 0.9 - origin).normalized()
+	arrow.launch(origin, dir, 22.0, dmg, self)
+	if anim:
+		anim.pop(0.25)
+	return true
+
+# ── WAND / SPELLS (2026-08-28): a member with WEAPON_TIERS[4] "Wand"
+# equipped casts a real magic bolt (tribe_spell_bolt.gd) with a burn DoT --
+# tribe's first "magic" weapon. Same range-preference shape as the bow.
+const WAND_RANGE := 12.0
+var _wand_cd: float = 0.0
+func _try_cast_at(foe) -> bool:
+	if weapon != 4:   # WEAPON_TIERS index 4 == "Wand"
+		return false
+	if _wand_cd > 0.0 or foe == null or not is_instance_valid(foe):
+		return false
+	_wand_cd = 1.8
+	var f := (foe as Node3D).global_position - global_position
+	f.y = 0.0
+	if f.length() < 0.01:
+		return false
+	rotation.y = lerp_angle(rotation.y, atan2(f.x, f.z), 0.5)
+	var dmg := 5.0 + float(get_might()) * 0.6
+	dmg *= weapon_mult()
+	var bolt = load("res://tribe_spell_bolt.gd").new()
+	get_tree().current_scene.add_child(bolt)
+	var origin: Vector3 = global_position + Vector3.UP * 1.3
+	var dir: Vector3 = ((foe as Node3D).global_position + Vector3.UP * 0.9 - origin).normalized()
+	bolt.launch(origin, dir, 16.0, dmg, 3.0, self)
+	if anim:
+		anim.pop(0.25)
 	return true
 
 func _build_faction_mark() -> void:
@@ -3678,9 +3736,15 @@ func _move(delta: float) -> void:
 			_apply_memory_stress(0.08)
 			_defend_attack_cd = maxf(0.0, _defend_attack_cd - delta)
 			_throw_cd = maxf(0.0, _throw_cd - delta)
+			_bow_cd = maxf(0.0, _bow_cd - delta)
+			_wand_cd = maxf(0.0, _wand_cd - delta)
 			var fp: Vector3 = (_foe as Node3D).global_position
 			var fd := global_position.distance_to(fp)
-			if fd < 1.7:
+			if weapon == 4 and fd < WAND_RANGE and fd > 1.7 and _try_cast_at(_foe):
+				_chase_timer = CHASE_GIVEUP_TIME
+			elif weapon == 2 and fd < BOW_RANGE and fd > 1.7 and _try_shoot_arrow_at(_foe):
+				_chase_timer = CHASE_GIVEUP_TIME
+			elif fd < 1.7:
 				_strike_foe()
 				_chase_timer = CHASE_GIVEUP_TIME
 			elif fd < THROW_RANGE and _try_throw_at(_foe):
