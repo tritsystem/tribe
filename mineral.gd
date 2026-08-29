@@ -115,22 +115,45 @@ func _process(delta: float) -> void:
 		_player = get_tree().get_first_node_in_group("player") as Node3D
 		if _player == null:
 			return
-	if global_position.distance_to(_player.global_position) <= _collect_range:
+	if global_position.distance_to(_player.global_position) <= _collect_range + _player_pickaxe_range_bonus():
 		_harvest()
 
+## PICKAXE MEMORY (2026-08-28): the player's real bonus range, read off
+## FPSPlayer's pickaxe_memory -- "the pickaxe gets better with use." Falls
+## back to 0.0 (no bonus) if the player node doesn't have it (e.g. an older
+## save or a non-FPSPlayer caller), same fail-soft style as the rest of this
+## file's has_method() checks.
+func _player_pickaxe_range_bonus() -> float:
+	if _player != null and is_instance_valid(_player) and "pickaxe_memory" in _player:
+		var pm = _player.get("pickaxe_memory")
+		if pm != null:
+			return pm.detect_range_bonus()
+	return 0.0
+
 func _harvest() -> void:
+	# PICKAXE MEMORY: yield scales with attunement -- same skill-pays-off
+	# principle as tribemember.gd's YIELD_BY_TIER, applied to personal mining.
+	var yield_mult: float = 1.0
+	if _player != null and is_instance_valid(_player) and "pickaxe_memory" in _player:
+		var pm = _player.get("pickaxe_memory")
+		if pm != null:
+			yield_mult = pm.yield_mult()
+			pm.on_mine()
+			if pm.has_method("save_to_disk"):
+				pm.save_to_disk()
+	var real_amount: int = maxi(1, int(round(float(amount) * yield_mult)))
 	var mgr = get_tree().get_first_node_in_group("tribe_manager")
 	if mgr and mgr.has_method("add_special_material"):
-		mgr.add_special_material(mat_type, amount)
+		mgr.add_special_material(mat_type, real_amount)
 	elif mgr and mgr.has_method("add_materials"):
-		mgr.add_materials(amount)
+		mgr.add_materials(real_amount)
 	if mgr and mgr.has_method("notify"):
-		mgr.notify("+%d %s" % [amount, mat_type])
+		mgr.notify("+%d %s" % [real_amount, mat_type])
 	# INVENTORY (2026-07-19): the tribe's shared stock gets the bulk deposit
 	# above; the player ALSO keeps a personal record of what they personally
 	# dug up, same as an NPC's own inventory tracks what they personally made.
 	if _player != null and is_instance_valid(_player) and _player.has_method("add_item"):
-		_player.add_item(mat_type, amount)
+		_player.add_item(mat_type, real_amount)
 	queue_free()
 
 func _register_with_grid() -> void:

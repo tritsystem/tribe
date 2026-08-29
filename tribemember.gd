@@ -576,6 +576,12 @@ const ARMOR_TIERS := [
 var weapon: int = 0
 var armor: int = 0
 
+# ── WEAPON PREFERENCE (2026-08-28): "wire spike thoughts into actions" --
+# see weapon_preference.gd. Real combat-experience-driven weapon choice,
+# not just equipment history.
+const WeaponPreferenceScript = preload("res://weapon_preference.gd")
+var weapon_pref: WeaponPreference = WeaponPreferenceScript.new()
+
 # ── PLAYER REPUTATION (2026-08-28): "remembers you, reputation builds over
 # repeat interactions" -- see player_reputation.gd. Distinct from
 # `relationship` (the existing single trust scalar) -- a separate recognition
@@ -1877,6 +1883,7 @@ func _strike_foe() -> void:
 		anim.pop(0.4)
 	if _foe.has_method("take_hit"):
 		_foe.take_hit(dmg, self)
+		weapon_pref.on_combat_success(weapon)
 
 # throw a club at a foe still out of melee range — npc.gd has always been
 # able to do this; loyal members couldn't, despite drawing from the same
@@ -1902,6 +1909,7 @@ func _try_throw_at(foe) -> bool:
 		anim.pop(0.4)
 	if foe.has_method("take_hit"):
 		foe.take_hit(dmg, self)
+		weapon_pref.on_combat_success(0)   # club-throw is always the Club type, regardless of equipped weapon tier
 	return true
 
 func _build_faction_mark() -> void:
@@ -3538,6 +3546,21 @@ func _maybe_upgrade_gear() -> void:
 	if not manager.has_method("spend_materials") or not ("materials" in manager):
 		return
 	if int(manager.materials) < _GEAR_MAT_COST:
+		return
+	# WEAPON PREFERENCE (2026-08-28): "wire spike thoughts into actions" --
+	# real combat experience can redirect an upgrade toward a ranged type
+	# (Bow/Wand) the member has actually been succeeding with, rather than
+	# blindly marching the fixed Club->Spear->Bow->Axe ladder every member
+	# follows regardless of how they fight. Only kicks in when there's a
+	# CLEAR preference for the other combat style (favors_ranged()) and
+	# they're not already using it -- a member who simply favors whatever
+	# they're currently equipped with (the common case) isn't redirected.
+	if weapon_pref.favors_ranged() and weapon != 2 and weapon != 4:
+		var favored: int = weapon_pref.favored_weapon_index()
+		if manager.spend_materials(_GEAR_MAT_COST):
+			weapon = favored
+			_think("My spear-arm's proven itself with a %s -- switching to it." % str(WEAPON_TIERS[favored]["name"]), 2.4)
+			return
 		return
 	# raise whichever track is lower (armor wins ties, so survivability comes first),
 	# respecting each track's ceiling

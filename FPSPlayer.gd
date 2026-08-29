@@ -32,6 +32,19 @@ var hunger: float = 0.0
 ## on top of whatever gets banked in the shared stockpile.
 var inventory: Dictionary = {}
 
+# ── WEAPON MEMORY (2026-08-28): "the weapon remembers the player" ──────────
+# Ported from horde-defense-beta's sword.gd/sword_memory.gd. Single-bond
+# version (tribe is single-player, unlike horde-beta's multi-player_id
+# design). Persists to disk so the bond survives session restart.
+const SwordMemoryScript = preload("res://sword_memory.gd")
+var weapon_memory: SwordMemory = SwordMemoryScript.new()
+var _weapon_memory_loaded : bool = false
+
+# ── PICKAXE MEMORY (2026-08-28): "gets better with use" ────────────────────
+const PickaxeMemoryScript = preload("res://pickaxe_memory.gd")
+var pickaxe_memory: PickaxeMemory = PickaxeMemoryScript.new()
+var _pickaxe_memory_loaded : bool = false
+
 func add_item(item: String, n: int = 1) -> void:
 	inventory[item] = int(inventory.get(item, 0)) + n
 
@@ -101,6 +114,12 @@ func _ready() -> void:
 	_target_yaw = rotation.y
 	_target_pitch = 0.0
 	_build_club_model()
+	if not _weapon_memory_loaded:
+		weapon_memory.load_from_disk()
+		_weapon_memory_loaded = true
+	if not _pickaxe_memory_loaded:
+		pickaxe_memory.load_from_disk()
+		_pickaxe_memory_loaded = true
 	_build_hurt_overlay()
 	if camera:
 		_cam_base_pos = camera.position
@@ -672,7 +691,13 @@ func _swing_club() -> void:
 	# 1) strike a tribesperson (rival or camp defender) — not neutrals
 	var foe := _nearest_in_group("npc", CLUB_REACH)
 	if foe and not foe.get("neutral") and foe.has_method("take_hit"):
-		foe.take_hit((18.0 if has_club else 9.0) * dmg_mult, self)
+		# WEAPON MEMORY: a real, capped damage bonus for a club the player
+		# has bonded with through combat -- see sword_memory.gd. Only real
+		# combat hits (foe/own member below) grow the bond -- chopping wood
+		# or clubbing a deer doesn't count as "fighting" the same way.
+		foe.take_hit((18.0 if has_club else 9.0) * dmg_mult * weapon_memory.attunement_damage_mult(), self)
+		weapon_memory.on_hit()
+		weapon_memory.save_to_disk()
 		manager.notify("You strike a tribesperson!")
 		return
 	# 1b) strike one of YOUR OWN tribe members — betrayal. Previously the
@@ -680,7 +705,9 @@ func _swing_club() -> void:
 	# "tribe") were never a valid melee target at all.
 	var own := _nearest_in_group("tribe", CLUB_REACH)
 	if own and own.has_method("take_hit"):
-		own.take_hit((18.0 if has_club else 9.0) * dmg_mult, self)
+		own.take_hit((18.0 if has_club else 9.0) * dmg_mult * weapon_memory.attunement_damage_mult(), self)
+		weapon_memory.on_hit()
+		weapon_memory.save_to_disk()
 		manager.notify("You strike %s! They will not forget this." % str(own.get("member_name")))
 		return
 	# 2) smash an enemy camp's totem — the blow is routed to their actual
