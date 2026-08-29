@@ -199,6 +199,36 @@ var _scheduled: Dictionary = {}   # int step_count -> Dictionary[int idx -> floa
 func _idx(n: String) -> int:
 	return _name_to_idx.get(n, -1)
 
+# RESONATOR DEFAULT COUPLING (2026-08-28): real, cited constant, ported
+# faithfully from Spikeling/core/runtime/runtime.py -- NOT a value invented
+# for this port. Real bug found and fixed here: this GDScript port's
+# .spk parser previously defaulted an unspecified `coupling=` to a flat
+# "1.0" for every resonator regardless of freq_hz, which never carried
+# over the reference's own default-coupling derivation at all -- and
+# reproduced, byte-for-byte, the exact channel-imbalance bug the reference
+# project's own resonator-prototype/resonator_bank.py already found and
+# fixed once ("a 1760Hz channel was invisible next to a 440Hz one").
+# Measured directly in test_resonator_frequency_sweep.gd's bank test:
+# 14.48x max/min channel-amplitude ratio with the old flat default, vs
+# 1.11x when the reference's own omega^2 scaling was applied explicitly
+# in that test (spikeling.gd itself was NOT touched at the time -- that
+# test only worked around the gap, it didn't close it). This closes it.
+#
+# The reference's own real logic (SpikelingRuntime.__init__, runtime.py):
+#     DEFAULT_RESONATOR_BASE_GAIN = 4.0e-4
+#     ...
+#     if n.neuron_type == "Resonator":
+#         coupling = n.coupling
+#         if coupling is None:                          # only when UNSET
+#             omega = 2 * math.pi * n.freq_hz
+#             coupling = DEFAULT_RESONATOR_BASE_GAIN * (omega ** 2)
+# The condition is real and load-bearing: this default ONLY applies when
+# a Resonator neuron's .spk line has no `coupling=` key at all -- an
+# explicit `coupling=` (any value, including one that happens to equal
+# 1.0) is used completely untouched, exactly as the reference does (`if
+# coupling is None`, not an always-on rescale of whatever value is there).
+const DEFAULT_RESONATOR_BASE_GAIN := 4.0e-4
+
 # ── Load a brain from .spk text ──────────────────────────────────────────────
 func load_from_text(text: String) -> bool:
 	neurons.clear()
@@ -223,7 +253,21 @@ func load_from_text(text: String) -> bool:
 			if n.type == "resonator":
 				n.freq_hz = float(_kv(line, "freq", "1.0"))
 				n.damping = float(_kv(line, "damping", "0.3"))
-				n.coupling = float(_kv(line, "coupling", "1.0"))
+				# COUPLING DEFAULT (2026-08-28): "" is a safe sentinel here --
+				# no real coupling value ever serializes to an empty string,
+				# so this reliably distinguishes "coupling= was absent from
+				# this line" (apply the reference's real omega^2-scaled
+				# default, see DEFAULT_RESONATOR_BASE_GAIN above) from "the
+				# author explicitly wrote coupling=<something>" (use exactly
+				# that value, untouched -- matching the reference's own
+				# `if coupling is None` condition precisely, not a rescale of
+				# every declared value).
+				var coupling_str := _kv(line, "coupling", "")
+				if coupling_str == "":
+					var omega_default: float = TAU * n.freq_hz
+					n.coupling = DEFAULT_RESONATOR_BASE_GAIN * (omega_default * omega_default)
+				else:
+					n.coupling = float(coupling_str)
 				n.gate_threshold = float(_kv(line, "gate_threshold", str(n.gate_threshold)))
 				n.energy_time_constant = float(_kv(line, "energy_time_constant", str(n.energy_time_constant)))
 				# REFRACTORY (2026-08-28): opt-in via `refractory_ms=`;

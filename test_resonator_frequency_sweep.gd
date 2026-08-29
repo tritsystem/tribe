@@ -192,18 +192,23 @@ func _interp_crossing_right(freqs: Array, energies: Array, peak_i: int, half_e: 
 #
 # REAL DISCREPANCY FOUND WHILE BUILDING THIS TEST: spikeling.gd's own
 # `.spk` parser does NOT auto-apply this scaling -- an unspecified
-# `coupling=` in this GDScript port defaults flatly to "1.0" every time
-# (see load_from_text()'s `_kv(line, "coupling", "1.0")`), not the
-# reference's omega^2-derived default. This port never carried the
-# reference's DEFAULT_RESONATOR_BASE_GAIN constant or its per-channel
-# auto-scaling at all -- only the raw ResonatorState.step() formula was
-# ported, not this piece of its own bank-usage convenience default. So
-# this test explicitly computes and passes `coupling=` per channel using
-# the reference's own formula (not inventing a new one), to test the
-# reference's actual documented intended usage pattern -- and separately
-# demonstrates that the port's flat 1.0 default reproduces the exact bug
-# the reference already fixed once, honestly disclosed rather than papered
-# over. Test code only; spikeling.gd's default is NOT changed here.
+# `coupling=` used to default flatly to "1.0" every time an unspecified
+# resonator was declared (see load_from_text()'s old
+# `_kv(line, "coupling", "1.0")`), not the reference's omega^2-derived
+# default -- this port never carried the reference's
+# DEFAULT_RESONATOR_BASE_GAIN constant or its per-channel auto-scaling at
+# all, only the raw ResonatorState.step() formula. That gap is now CLOSED
+# in spikeling.gd itself (see DEFAULT_RESONATOR_BASE_GAIN there): an
+# unspecified `coupling=` now genuinely gets the reference's real
+# omega^2-scaled default; an explicit `coupling=` is untouched, same
+# condition as the reference's own `if coupling is None`.
+#
+# Three configs below, to verify the REAL fix (not just simulate it in
+# test code): "flat" (explicit coupling=1.0, kept only as the historical
+# documented-bug baseline for comparison), "scaled" (explicit
+# reference-formula coupling, the known-good target), and "engine_default"
+# (coupling= OMITTED ENTIRELY from the .spk text -- this is the actual
+# code path this task fixed, exercised directly, not hand-simulated).
 const BASE_GAIN := 4.0e-4
 const BANK_DAMPING := 0.15
 const BANK_FREQS := [2.0, 4.0, 8.0]   # same 1:2:4 ratio as the reference's own 440/880/1760Hz case
@@ -212,36 +217,54 @@ func _bank_test() -> void:
 	print("\n-- Bank test: %d channels (%s Hz), shared mixed drive --" \
 		% [BANK_FREQS.size(), str(BANK_FREQS)])
 
-	var flat_amps := _bank_amplitudes(false)
-	var scaled_amps := _bank_amplitudes(true)
+	var flat_amps := _bank_amplitudes("flat")
+	var scaled_amps := _bank_amplitudes("scaled")
+	var default_amps := _bank_amplitudes("engine_default")
 
-	print("  FLAT coupling=1.0 (this port's actual current .spk default when coupling= is omitted):")
+	print("  FLAT coupling=1.0 (historical documented-bug baseline, explicit -- no longer this port's actual default):")
 	_print_bank_amps(flat_amps)
 	var flat_ratio: float = _max_min_ratio(flat_amps)
 	print("    max/min channel-amplitude ratio: %.2f" % flat_ratio)
 
-	print("  omega^2-SCALED coupling (reference's own documented default-scaling rule, coupling = %s * omega^2):" % str(BASE_GAIN))
+	print("  omega^2-SCALED coupling (reference's own documented default-scaling rule, explicit coupling = %s * omega^2):" % str(BASE_GAIN))
 	_print_bank_amps(scaled_amps)
 	var scaled_ratio: float = _max_min_ratio(scaled_amps)
 	print("    max/min channel-amplitude ratio: %.2f" % scaled_ratio)
 
+	print("  ENGINE DEFAULT -- coupling= OMITTED, exercising spikeling.gd's real (now-fixed) default path directly:")
+	_print_bank_amps(default_amps)
+	var default_ratio: float = _max_min_ratio(default_amps)
+	print("    max/min channel-amplitude ratio: %.2f" % default_ratio)
+
 	_check("bank: every channel (flat coupling) still detects real, nonzero amplitude at its own frequency",
 		float(flat_amps[0]) > 0.0 and float(flat_amps[1]) > 0.0 and float(flat_amps[2]) > 0.0)
-	_check("bank: FLAT coupling reproduces the reference's own documented bug -- the highest-frequency channel is drowned out (>=5x weaker than the lowest)",
+	_check("bank: FLAT coupling=1.0 reproduces the reference's own documented bug -- the highest-frequency channel is drowned out (>=5x weaker than the lowest); kept as the historical baseline, no longer reachable via an omitted coupling=",
 		flat_ratio >= 5.0)
-	_check("bank: omega^2-SCALED coupling (real fix, per reference) brings channels to comparable gain (max/min ratio < 3x)",
+	_check("bank: omega^2-SCALED explicit coupling (reference's target) brings channels to comparable gain (max/min ratio < 3x)",
 		scaled_ratio < 3.0)
-	_check("bank: scaling measurably improves balance vs flat coupling",
-		scaled_ratio < flat_ratio)
+	_check("bank: the REAL FIX -- spikeling.gd's own engine default (coupling= omitted) now ALSO brings channels to comparable gain (max/min ratio < 3x), not the old flat-1.0 imbalance",
+		default_ratio < 3.0)
+	_check("bank: the engine default's ratio matches the explicit-scaled config closely (within 5%) -- confirms the parser is genuinely computing the same formula, not a coincidentally-similar different one",
+		absf(default_ratio - scaled_ratio) / scaled_ratio < 0.05)
+	_check("bank: scaling (both explicit and now the real engine default) measurably improves balance vs the old flat baseline",
+		scaled_ratio < flat_ratio and default_ratio < flat_ratio)
 
-func _bank_amplitudes(use_scaling: bool) -> Array:
+func _bank_amplitudes(mode: String) -> Array:
 	var brains: Array = []
 	for f in BANK_FREQS:
 		var freq: float = f
-		var omega: float = TAU * freq
-		var coupling: float = (BASE_GAIN * omega * omega) if use_scaling else 1.0
-		var spk := "neuron R type=resonator threshold=999.0 freq=%s damping=%s coupling=%s energy_time_constant=%s\ndt=%s\n" \
-			% [str(freq), str(BANK_DAMPING), str(coupling), str(ENERGY_TIME_CONSTANT), str(DT)]
+		var coupling_clause := ""
+		if mode == "flat":
+			coupling_clause = " coupling=1.0"
+		elif mode == "scaled":
+			var omega: float = TAU * freq
+			var coupling: float = BASE_GAIN * omega * omega
+			coupling_clause = " coupling=%s" % str(coupling)
+		# mode == "engine_default": coupling_clause stays "" -- coupling= is
+		# genuinely absent from this .spk line, so spikeling.gd's own parser
+		# has to compute the default itself.
+		var spk := "neuron R type=resonator threshold=999.0 freq=%s damping=%s%s energy_time_constant=%s\ndt=%s\n" \
+			% [str(freq), str(BANK_DAMPING), coupling_clause, str(ENERGY_TIME_CONSTANT), str(DT)]
 		var b := Spikeling.new()
 		b.load_from_text(spk)
 		brains.append(b)
