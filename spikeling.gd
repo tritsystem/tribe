@@ -40,6 +40,43 @@ class Neuron:
 	# (not just "did both fire this step") for stdp_learn() below.
 	var last_fire_step: int = -1
 
+	# RESONATOR (2026-08-28): neuron model selector. "lif" (default) is the
+	# existing pulsed/refractory integrate-and-fire model above, untouched.
+	# "resonator" switches this neuron to a CONTINUOUSLY-driven damped
+	# harmonic oscillator instead -- ported from the real Spikeling engine's
+	# ResonatorState (Spikeling/core/runtime/runtime.py), not reinvented
+	# here. That model is already physically hardware-validated (real mic
+	# input, structured noise nulled at readout -- see
+	# spikeling_phononic_bridge). Frequency-selective by construction:
+	# unlike LIF, it only builds amplitude when its drive contains energy
+	# near its own freq_hz, and never "resets" -- there's no refractory
+	# period, just continuous x/v integration.
+	var type: String = "lif"
+	# resonator-only state/params below -- declared unconditionally (cheap,
+	# a handful of floats) so nothing about the LIF path above has to
+	# change shape; every field here is inert when type == "lif".
+	var freq_hz: float = 1.0
+	var damping: float = 0.3
+	var coupling: float = 1.0
+	var res_x: float = 0.0             # oscillator position
+	var res_v: float = 0.0             # oscillator velocity
+	var energy_ema: float = 0.0        # exp. moving avg of x^2 -- cheap stand-in for RMS energy
+	# below their gate_threshold. Left at 0.0 by default (i.e. off) here --
+	# ResonatorState's original 0.00024 default was tuned for a 40kHz
+	# audio-hardware amplitude scale; this game's neuron drive magnitudes
+	# (stimulate() amounts like 50-400) live on a completely different
+	# scale, so gating on an unexamined ported constant could silently
+	# suppress real detections. Opt in per-neuron via the .spk
+	# `gate_threshold=` key once a real amplitude scale is known.
+	var gate_threshold: float = 0.0
+	# 0.5s (5 ticks at this project's 10Hz brain tick -- see tribemember.gd
+	# TICK_HZ) instead of ResonatorState's original 0.0025s: that constant
+	# was correct for its own 40kHz sample rate but would collapse to
+	# near-zero smoothing (alpha clamps to 1.0) at this game's much coarser
+	# per-step dt -- the exact "sample-rate bug" runtime.py's own docstring
+	# warns about, not repeated here.
+	var energy_time_constant: float = 0.5
+
 class Synapse:
 	var src: int                # source neuron index
 	var dst: int                # target neuron index
@@ -61,6 +98,16 @@ var synapses: Array = []                 # Array[Synapse]
 var _name_to_idx: Dictionary = {}        # String -> int
 var refractory_ticks: int = 4
 var step_count: int = 0
+# RESONATOR (2026-08-28): seconds per step() call. Only meaningful for
+# resonator-type neurons (LIF is tick-based, not physically timed, so this
+# doesn't touch its behavior at all). Defaults to this project's actual
+# brain-tick rate (tribemember.gd TICK_HZ = 10Hz -> 0.1s/tick), overridable
+# per-brain via a `dt=` line in the .spk text, same pattern as refractory=.
+# NAMED step_dt, not dt: stdp_learn() below already has a local `dt`
+# (spike-timing delta, in ticks) -- same short name, different unit and
+# meaning entirely; keeping them visually distinct avoids relying on
+# GDScript's local-shadows-member rule to keep them apart.
+var step_dt: float = 0.1
 
 # spikes scheduled to arrive next step: idx -> accumulated weight
 var _pending: Dictionary = {}
@@ -93,10 +140,22 @@ func load_from_text(text: String) -> bool:
 			n.name = _grab(line, "neuron ", " ")
 			n.threshold = float(_kv(line, "threshold", "100"))
 			n.leak = float(_kv(line, "leak", "5"))
+			# RESONATOR (2026-08-28): `type=resonator` opts a neuron out of
+			# the LIF path entirely. Unrecognized/absent `type=` -> "lif",
+			# so every brain written before this change parses identically.
+			n.type = _kv(line, "type", "lif")
+			if n.type == "resonator":
+				n.freq_hz = float(_kv(line, "freq", "1.0"))
+				n.damping = float(_kv(line, "damping", "0.3"))
+				n.coupling = float(_kv(line, "coupling", "1.0"))
+				n.gate_threshold = float(_kv(line, "gate_threshold", str(n.gate_threshold)))
+				n.energy_time_constant = float(_kv(line, "energy_time_constant", str(n.energy_time_constant)))
 			_name_to_idx[n.name] = neurons.size()
 			neurons.append(n)
 		elif line.begins_with("refractory="):
 			refractory_ticks = int(line.replace("refractory=", "").replace("ms", "").strip_edges())
+		elif line.begins_with("dt="):
+			step_dt = float(line.replace("dt=", "").strip_edges())
 
 	# pass 2: synapses
 	for raw in lines:
@@ -153,6 +212,16 @@ func step() -> Array:
 		var n: Neuron = neurons[i]
 		n.fired = false
 
+		# RESONATOR (2026-08-28): a completely separate branch, not a
+		# modification of the LIF path below -- a resonator neuron has no
+		# refractory period and is never "pulsed", so it can't share the
+		# leak/threshold-reset mechanics LIF relies on. Kept as its own
+		# private helper (_step_resonator) rather than inlined here so the
+		# LIF code beneath is textually untouched.
+		if n.type == "resonator":
+			_step_resonator(n, i, incoming_synaptic, fired_now)
+			continue
+
 		if n.refr_left > 0:
 			n.refr_left -= 1
 			continue
@@ -189,6 +258,69 @@ func step() -> Array:
 
 	_pending.clear()
 	return fired_now
+
+# ── RESONATOR: continuously-driven damped harmonic oscillator ─────────────────
+# Ported from Spikeling/core/runtime/runtime.py's ResonatorState.step() --
+# the same formula, same symplectic-Euler integration order (velocity
+# updated from acceleration BEFORE position, not the reverse -- the source
+# docstring notes plain Euler is numerically unstable here), same amplitude-
+# gated energy EMA optimization. Only the two things that are legitimately
+# per-project (dt's real-world scale, gate_threshold's default) were
+# re-tuned for this game rather than blindly copied -- see the Neuron
+# field comments above for why.
+#
+# Unlike LIF, this is edge-triggered on ENERGY crossing `threshold`, not a
+# potential hitting it, and there's no reset/refractory afterward: the
+# oscillator just keeps ringing. "Fired" here means "just started being
+# loud enough to count as detected", exactly like the real ResonatorState.
+func _step_resonator(n: Neuron, i: int, incoming_synaptic: Dictionary, fired_now: Array) -> void:
+	var drive: float = _pending.get(i, 0.0) + incoming_synaptic.get(i, 0.0)
+	var omega: float = TAU * n.freq_hz
+	var accel: float = -(omega * omega) * n.res_x - 2.0 * n.damping * omega * n.res_v
+	accel += n.coupling * drive
+	n.res_v += accel * step_dt
+	n.res_x += n.res_v * step_dt
+
+	var alpha: float = minf(1.0, step_dt / n.energy_time_constant)
+	var was_above: bool = sqrt(n.energy_ema) >= n.threshold
+	if absf(n.res_x) >= n.gate_threshold:
+		n.energy_ema += alpha * (n.res_x * n.res_x - n.energy_ema)
+	else:
+		n.energy_ema -= alpha * n.energy_ema  # decay only -- skip the x*x multiply
+	var now_above: bool = sqrt(n.energy_ema) >= n.threshold
+
+	if now_above and not was_above:
+		n.last_fire_strength = clampf((sqrt(n.energy_ema) - n.threshold) / maxf(0.0001, n.threshold), 0.0, 1.0)
+		n.fired = true
+		n.fire_count += 1
+		n.last_fire_step = step_count
+		fired_now.append(n.name)
+		# same delayed-propagation shape as the LIF branch in step() above
+		# (deliberately duplicated, not factored into a shared helper --
+		# keeps this branch fully self-contained and easy to verify against
+		# ResonatorState in isolation).
+		for s in synapses:
+			if s.src == i:
+				var arrival: int = step_count + s.delay
+				if not _scheduled.has(arrival):
+					_scheduled[arrival] = {}
+				var bucket: Dictionary = _scheduled[arrival]
+				bucket[s.dst] = bucket.get(s.dst, 0.0) + s.weight
+
+## Resonator-only introspection: current RMS-style amplitude estimate
+## (sqrt of the energy EMA), same units as `threshold`. 0.0 for LIF neurons
+## or unknown names.
+func resonator_amplitude(neuron_name: String) -> float:
+	var i := _idx(neuron_name)
+	if i < 0 or neurons[i].type != "resonator":
+		return 0.0
+	return sqrt(neurons[i].energy_ema)
+
+## Resonator-only introspection: raw oscillator position `x` this step --
+## the actual continuous waveform, not just the edge-triggered detection.
+func resonator_x(neuron_name: String) -> float:
+	var i := _idx(neuron_name)
+	return neurons[i].res_x if i >= 0 else 0.0
 
 # ── Hebbian-ish learning: strengthen synapses whose src AND dst fired ─────────
 # Call after step() when you want the brain to learn. reward scales the change.
@@ -279,6 +411,11 @@ func neuron_states() -> Array:
 		out.append({
 			"name": n.name, "p": n.p, "threshold": n.threshold,
 			"leak": n.leak, "fired": n.fired, "refr": n.refr_left,
+			# RESONATOR (2026-08-28): additive keys, harmless/default-valued
+			# for existing LIF neurons -- lets the visualizer show the real
+			# continuous waveform (res_x) for resonator neurons instead of
+			# a meaningless flat "p", without changing the LIF entries at all.
+			"type": n.type, "res_x": n.res_x, "res_amplitude": sqrt(n.energy_ema),
 		})
 	return out
 
@@ -295,13 +432,24 @@ func export_spk() -> String:
 	# serialize current brain (with learned weights) back to .spk
 	var out := "# Spikeling Neural Configuration\n"
 	for n in neurons:
-		out += "neuron %s threshold=%d leak=%d\n" % [n.name, int(n.threshold), int(n.leak)]
+		if n.type == "resonator":
+			# RESONATOR (2026-08-28): threshold here is an RMS-amplitude
+			# level, not a membrane potential -- keep it a real float
+			# (%d would truncate a sub-1.0 value to 0 and silently break
+			# re-loading), unlike the LIF branch below which is correctly
+			# integer-valued.
+			out += "neuron %s type=resonator threshold=%s freq=%s damping=%s coupling=%s\n" % [
+				n.name, str(n.threshold), str(n.freq_hz), str(n.damping), str(n.coupling)]
+		else:
+			out += "neuron %s threshold=%d leak=%d\n" % [n.name, int(n.threshold), int(n.leak)]
 	for s in synapses:
 		if s.delay > 1:
 			out += "synapse %s -> %s weight=%d delay=%d\n" % [neurons[s.src].name, neurons[s.dst].name, int(s.weight), s.delay]
 		else:
 			out += "synapse %s -> %s weight=%d\n" % [neurons[s.src].name, neurons[s.dst].name, int(s.weight)]
 	out += "refractory=%d\n" % refractory_ticks
+	if step_dt != 0.1:
+		out += "dt=%s\n" % str(step_dt)
 	return out
 
 # ── tiny string helpers ──────────────────────────────────────────────────────
