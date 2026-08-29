@@ -261,6 +261,17 @@ var _wander_pause: float = 0.0
 var _fidget_cd: float = 0.0              # time until next idle fidget
 var _leaving: bool = false               # starved out — wandering off
 
+# ── ROUTE MEMORY (2026-08-28): private per-member "muscle memory" of the map.
+# NOT wired into the Spikeling trust brain (see the deliberate note above
+# _brain_text() re: not bolting senses onto a calibrated system blind) --
+# reuses the SAME leaky-reinforcement/bounded-growth mechanics as
+# spikeling.gd's own learn(), applied to a spatial grid instead. Private by
+# default; shared tribe-wide only when members actually talk (see
+# TribeRouteMemory autoload + tribe_talk.gd's _on_line hook below).
+var route_memory: RouteMemory = RouteMemory.new()
+var _route_decay_accum: float = 0.0
+const ROUTE_DECAY_INTERVAL := 2.0     # seconds between decay ticks (cheap, not every physics frame)
+
 # ── orders / tasks ──
 const RANK_COLORS := {
 	"Stranger":     Color(0.60, 0.60, 0.60),
@@ -1942,6 +1953,17 @@ func _physics_process(delta: float) -> void:
 	if _grid_cd <= 0.0:
 		_grid_cd = 0.25
 		SpatialGrid.update(self)
+
+	# ROUTE MEMORY: record this position as visited (reinforces the cell +
+	# any transition from the last cell), then periodically let unused
+	# cells/edges decay -- same LOD gate as the brain since a member the
+	# player can't see doesn't need route learning either.
+	if not _far_from_player:
+		route_memory.visit(global_position)
+	_route_decay_accum += delta
+	if _route_decay_accum >= ROUTE_DECAY_INTERVAL:
+		_route_decay_accum = 0.0
+		route_memory.decay(1.0)
 
 	# decay the bond slowly so trust must be maintained, not just spiked once
 	relationship = maxf(0.0, relationship - delta * BOND_DECAY_RATE)
@@ -3867,6 +3889,10 @@ func _arrived(p: Vector3) -> bool:
 func _steer_to(p: Vector3, delta: float, spd: float = -1.0) -> void:
 	if spd < 0.0:
 		spd = move_speed
+	# ROUTE MEMORY: worn paths let this member move faster toward a target
+	# they've walked this way to before -- literal "efficient known routes",
+	# not just a label. Multiplier is 1.0 (no bonus) on unfamiliar ground.
+	spd *= route_memory.route_speed_mult(global_position, p)
 	var to := p - global_position
 	to.y = 0.0
 	var dist := to.length()

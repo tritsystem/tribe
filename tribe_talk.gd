@@ -116,6 +116,13 @@ func _try_start() -> void:
 	_speakers[an] = a
 	_speakers[bn] = b
 
+	# ROUTE MEMORY (2026-08-28): only tribe-to-tribe (not cross-tribe rival)
+	# meetings share worn-path knowledge -- route knowledge is a tribe
+	# secret, matching how relationship/TribeMemory data already never
+	# crosses tribe lines. Shared once per real conversation, not every tick.
+	if not cross_tribe:
+		TribeRouteMemory.share_on_meet(a, b)
+
 	if cross_tribe:
 		var b_tribe = b.get("tribe")
 		var b_tribe_name: String = str(b_tribe.tribe_name) if b_tribe and is_instance_valid(b_tribe) else "a rival clan"
