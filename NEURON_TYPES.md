@@ -16,22 +16,50 @@ Every brain in Tribe — Trust, Follow, SawContribute, SawBetray, all of
 it — ran on **leaky integrate-and-fire (LIF)**: a membrane potential
 that leaks toward zero every tick, accumulates weighted synaptic input,
 fires when it crosses a threshold, then sits refractory before it can
-fire again.
+fire again. This is the real code, unchanged, still the default path
+for every neuron that doesn't opt into one of the three types below
+(`spikeling.gd::step()`):
+
+```gdscript
+if n.refr_left > 0:
+    n.refr_left -= 1
+    continue
+
+# leaky integration
+n.p -= n.leak
+if n.p < 0.0:
+    n.p = 0.0
+n.p += _pending.get(i, 0.0) + incoming_synaptic.get(i, 0.0)
+
+# threshold check
+if n.p >= n.threshold:
+    n.last_fire_strength = clampf((n.p - n.threshold) / maxf(1.0, n.threshold), 0.0, 1.0)
+    n.p = 0.0
+    n.refr_left = refractory_ticks
+    n.fired = true
+    n.fire_count += 1
+    n.last_fire_step = step_count
+    fired_now.append(n.name)
+```
 
 LIF answers exactly one question: **how much stimulus, total.** It has
 no way to represent *how* that stimulus arrived — a burst of five hits
 in one second and the same five hits spread across a minute look
-identical to a LIF neuron, because it only ever tracks a running sum.
-That's the real limitation the whole expansion below addresses.
+identical to a LIF neuron, because it only ever tracks a running sum
+(`n.p`) that gets wiped to exactly `0.0` on every fire. That's the real
+limitation the whole expansion below addresses.
 
 ## After: four neuron models, each answering a different question
 
-| Neuron | Real computation | What it can represent that LIF can't | Status in Tribe today |
+| Neuron | Resets on fire? | What it can represent that LIF can't | Status in Tribe today |
 |---|---|---|---|
-| **LIF** | `p' = -leak·p`, fires + resets to 0 at threshold | — (the baseline) | Live everywhere, unchanged |
-| **Izhikevich** | `v' = 0.04v² + 5v + 140 - u + I`, `u' = a(bv-u)`, resets `v←c, u←u+d` | **Pattern over time** — a recovery variable that carries across spikes, so a burst and a spread-out sequence of the same total stimulus produce different internal state | Live: `BurstTrauma` |
-| **AdEx** | `v' = (-g_L(v-E_L) + g_LΔ_T e^{(v-V_T)/Δ_T} - w + I)/C`, `w' = (a(v-E_L)-w)/τ_w`, resets `v←v_reset, w←w+b` | **Repetition / fatigue** — an adaptation current that suppresses response to repeated stimulation, then recovers | Live: `BetrayalFatigue` |
-| **Resonator** | `accel = -ω²x - 2ζωv + coupling·drive` (driven damped oscillator), fires on energy-envelope threshold crossing, **no reset** | **Frequency** — which *rate* a signal is happening at, not just how much of it there is | Ported, characterized, real capability confirmed — not wired into gameplay (see below) |
+| **LIF** | `p ← 0.0` | — (the baseline) | Live everywhere, unchanged |
+| **Izhikevich** | `v ← c`, `u ← u + d` (not reset — incremented) | **Pattern over time** — `u` carries across spikes, so a burst and a spread-out sequence of the same total stimulus produce different internal state | Live: `BurstTrauma` |
+| **AdEx** | `v ← v_reset`, `w ← w + b` | **Repetition / fatigue** — `w` accumulates and directly suppresses future response, then decays | Live: `BetrayalFatigue` |
+| **Resonator** | **nothing** — `res_x`/`res_v` never touched | **Frequency** — which *rate* a signal is happening at, not just how much of it there is | Ported, characterized, real capability confirmed — not wired into gameplay (see below) |
+
+Real code for each is below — this table is a quick-reference, not the
+source of truth.
 
 ## What each one is actually good and bad for
 
@@ -49,6 +77,31 @@ from a tenth, or a familiar signal from an unfamiliar one — all it has
 is a running total.
 
 ### Izhikevich — pattern detection, shipped in `BurstTrauma`
+
+Real Izhikevich (2003) equations, ported from
+`Spikeling/pyspike_neuron_models.py`'s `IzhikevichNeuron.step()`,
+sub-stepped at 0.5ms because the `0.04*v²` term is too stiff for a
+single game-tick-sized step (`spikeling.gd::_step_izhikevich()`):
+
+```gdscript
+for _s in range(substeps):
+    var dv: float = 0.04 * n.iz_v * n.iz_v + 5.0 * n.iz_v + 140.0 - n.iz_u + drive
+    var du: float = n.iz_a * (n.iz_b * n.iz_v - n.iz_u)
+    n.iz_v += dv * sub_dt
+    n.iz_u += du * sub_dt
+    if n.iz_v >= n.threshold:
+        n.last_fire_strength = clampf((n.iz_v - n.threshold) / maxf(1.0, absf(n.threshold)), 0.0, 1.0)
+        n.iz_v = n.iz_c
+        n.iz_u += n.iz_d
+        any_fired = true
+```
+
+Note the second reset line: `iz_u` is *incremented*, not set to a
+fixed value. Compare to LIF's `n.p = 0.0` above — Izhikevich's `iz_u`
+is *incremented* on fire, not zeroed, and otherwise evolves on its own
+slower timescale — so recent firing history keeps literally shaping the
+neuron's future response. LIF's flat reset cannot represent that at
+any tuning.
 
 **Good for:** telling a burst apart from the same total spread out.
 Tribe's trauma mechanic (`_trauma_hit_count`) used to shift a member's
@@ -71,6 +124,32 @@ detecting a burst across a multi-second window. Retuned to `a=0.001`
 (~1000ms) before it did anything meaningful.
 
 ### AdEx — repetition fatigue, shipped in `BetrayalFatigue`
+
+Real Brette & Gerstner (2005) equations, ported from the same
+reference module, sub-stepped at 0.1ms
+(`spikeling.gd::_step_adex()`):
+
+```gdscript
+for _s in range(substeps):
+    var exp_term: float = n.adex_deltaT * exp(minf(50.0, (n.adex_v - n.adex_VT) / n.adex_deltaT))
+    var dv: float = (-n.adex_gL * (n.adex_v - n.adex_EL) + n.adex_gL * exp_term - n.adex_w + drive) / n.adex_C
+    var dw: float = (n.adex_a * (n.adex_v - n.adex_EL) - n.adex_w) / n.adex_tau_w
+    n.adex_v += dv * sub_dt
+    n.adex_w += dw * sub_dt
+    if n.adex_v >= n.threshold:
+        n.last_fire_strength = clampf((n.adex_v - n.threshold) / maxf(1.0, absf(n.threshold)), 0.0, 1.0)
+        n.adex_v = n.adex_vreset
+        n.adex_w += n.adex_b
+        any_fired = true
+```
+
+`adex_w` (that last reset line) is the whole mechanism: it grows by a
+fixed amount every time the neuron spikes, and directly subtracts from
+the depolarizing current
+(`dv`'s `- n.adex_w` term) on every subsequent step — so repeated
+stimulation drives a progressively weaker response, with no external
+cooldown timer needed. LIF's leak has no memory of past spikes at all,
+so it structurally cannot reproduce this at any tuning.
 
 **Good for:** making repeated punishment feel different from a first
 offense, without hand-coding a discount table. `SawBetray` used to hit
@@ -97,6 +176,46 @@ AdEx — it's the kind of pre-existing bug that only gets found when
 someone finally has a reason to test the old mechanic carefully.
 
 ### Resonator — frequency detection, real but currently unused
+
+Real damped, driven harmonic oscillator, ported from
+`Spikeling/core/runtime/runtime.py`'s `ResonatorState.step()`, same
+symplectic-Euler order (velocity updates from acceleration *before*
+position — plain Euler is numerically unstable here per the source's
+own docstring) (`spikeling.gd::_step_resonator()`):
+
+```gdscript
+var omega: float = TAU * n.freq_hz
+var accel: float = -(omega * omega) * n.res_x - 2.0 * n.damping * omega * n.res_v
+accel += n.coupling * drive
+n.res_v += accel * step_dt
+n.res_x += n.res_v * step_dt
+
+var alpha: float = minf(1.0, step_dt / n.energy_time_constant)
+var was_above: bool = sqrt(n.energy_ema) >= n.threshold
+if absf(n.res_x) >= n.gate_threshold:
+    n.energy_ema += alpha * (n.res_x * n.res_x - n.energy_ema)
+else:
+    n.energy_ema -= alpha * n.energy_ema
+var now_above: bool = sqrt(n.energy_ema) >= n.threshold
+
+if now_above and not was_above:
+    n.last_fire_strength = clampf((sqrt(n.energy_ema) - n.threshold) / maxf(0.0001, n.threshold), 0.0, 1.0)
+    n.fired = true
+    n.fire_count += 1
+    n.last_fire_step = step_count
+    fired_now.append(n.name)
+```
+
+Note what's *not* there: no line resetting `res_x` or `res_v`.
+
+Every other type's fire branch resets its own state (`n.p = 0.0`,
+`iz_v <- c`, `adex_v <- vreset`) — firing *is* the computation for
+those three. Resonator's `res_x`/`res_v` are never touched here; the
+"fire" is a passive threshold crossing on a *derived* quantity
+(`energy_ema`, an exponential moving average of `res_x²`), layered on
+top of dynamics that don't care whether it happened. That's the real,
+structural reason it can't do what the other three can (see "Bad for"
+below) — it's not a tuning gap, it's what the code actually does.
 
 **Good for:** telling apart *what rate* something is happening at, not
 just whether it's happening. This is a fundamentally different kind of
