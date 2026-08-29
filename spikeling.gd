@@ -554,17 +554,48 @@ func resonator_x(neuron_name: String) -> float:
 # over a long session and the personalities (Wary vs Trusting…) wash out into one.
 const GROW_CEIL := 1.8          # most a bond can grow past its innate strength
 const RELAX_RATE := 0.05        # per-call drift back toward innate weight
+# REAL PRE-EXISTING BUG, FOUND WHILE BUILDING THE BETRAYAL-FATIGUE HOOK
+# (2026-08-28): `clamp(s.weight, 0.0, 255.0)` below has been in this file
+# since the very first commit, and assumed every synapse weight is
+# non-negative -- true for every synapse in this project EXCEPT
+# SawBetray -> Trust (weight=-160, tribemember.gd's only negative-weight
+# synapse). Since `learn()` runs unconditionally every single _brain_tick()
+# (not just after a betrayal), the ELSE branch's move_toward() leaves a
+# -160 weight untouched (already at its own base_weight) but the trailing
+# clamp(0, 255) still floors it to 0.0 regardless -- on the very FIRST
+# ordinary tick of ANY member's existence, before any betrayal has ever
+# happened. Confirmed directly (calib_probe3.gd, since deleted): a fresh
+# member's SawBetray->Trust weight reads -160 at brain-load, then 0.0 after
+# exactly one ordinary _brain_tick() with zero stimulation of anything.
+# Real consequence: every betrayal after the first ever silently landed a
+# ZERO-strength hit on Trust, not a repeated identical -160 as this whole
+# task's own framing assumed. Fixed with the minimal, symmetric bound
+# below -- exactly this file's existing precedent for clamp/bound bugs
+# (see the `_kv()` key-boundary fix elsewhere in this same file): every
+# POSITIVE-base-weight synapse (the overwhelming majority) clamps to
+# [0, 255] exactly as before, byte-identical behavior; a NEGATIVE-
+# base-weight synapse now clamps to the mirrored [-255, 0] instead of
+# being silently destroyed.
 func learn(reward: float, rate: float = 1.0) -> void:
 	for s in synapses:
 		var src_n: Neuron = neurons[s.src]
 		var dst_n: Neuron = neurons[s.dst]
 		var ceil_w: float = s.base_weight * GROW_CEIL
 		if src_n.fired and dst_n.fired:
-			s.weight = minf(ceil_w, s.weight + reward * rate)
+			if s.base_weight >= 0.0:
+				s.weight = minf(ceil_w, s.weight + reward * rate)
+			else:
+				# a negative-weight synapse "growing" means getting MORE
+				# negative (a stronger betrayal-style hit), same direction
+				# of intent as the positive-weight branch above, mirrored.
+				s.weight = maxf(ceil_w, s.weight - reward * rate)
 		else:
 			# unused bonds slowly forget back toward their innate strength
 			s.weight = move_toward(s.weight, s.base_weight, RELAX_RATE * rate)
-		s.weight = clamp(s.weight, 0.0, 255.0)
+		if s.base_weight >= 0.0:
+			s.weight = clamp(s.weight, 0.0, 255.0)
+		else:
+			s.weight = clamp(s.weight, -255.0, 0.0)
 
 # ── STDP: real spike-timing-dependent plasticity ──────────────────────────
 # Classic exponential STDP window (Bi & Poo 1998 shape), unlike learn()'s
@@ -585,6 +616,19 @@ const STDP_A_MINUS := 0.28      # depression strength (post before pre) -- class
 								  # smaller-magnitude-but-present asymmetry between the two
 const STDP_TAU := 3.0           # decay time-constant (ticks) of the exponential window
 func stdp_learn(rate: float = 1.0) -> void:
+	# Same "clamp(0,255) silently destroys a negative-weight synapse" bug as
+	# learn() above -- fixed at the two straightforward clamp sites below for
+	# consistency (STDP is opt-in/off by default, so this wasn't the path
+	# that actually broke live betrayal, but leaving it unfixed would let the
+	# exact same corruption resurface the moment the "tribe/use_stdp" toggle
+	# is ever flipped on). NOT touched here: the `minf(ceil_w, ...)` /
+	# `maxf(s.base_weight * 0.2, ...)` growth-cap lines just below -- those
+	# assume a positive base_weight's direction of "growth" and would need
+	# their own deliberate symmetric redesign for a negative-weight synapse
+	# (mirroring learn()'s fix isn't a one-line change here, since dt>0 vs
+	# dt<0 already encode a positive/negative-style asymmetry of their own).
+	# Real, disclosed, deliberately out of THIS task's scope -- SawBetray's
+	# actual live gameplay path is learn(), not stdp_learn().
 	for s in synapses:
 		var src_n: Neuron = neurons[s.src]
 		var dst_n: Neuron = neurons[s.dst]
@@ -592,7 +636,7 @@ func stdp_learn(rate: float = 1.0) -> void:
 		if src_n.last_fire_step < 0 or dst_n.last_fire_step < 0:
 			# one or both have never fired -- nothing to time against yet
 			s.weight = move_toward(s.weight, s.base_weight, RELAX_RATE * rate)
-			s.weight = clamp(s.weight, 0.0, 255.0)
+			s.weight = clamp(s.weight, 0.0, 255.0) if s.base_weight >= 0.0 else clamp(s.weight, -255.0, 0.0)
 			continue
 		var dt: int = dst_n.last_fire_step - src_n.last_fire_step  # >0: pre led post
 		if dt == 0 or absi(dt) > STDP_WINDOW:
@@ -606,7 +650,7 @@ func stdp_learn(rate: float = 1.0) -> void:
 			# dst (post) fired before src (pre) -- anti-causal, depress
 			var delta_neg: float = STDP_A_MINUS * exp(-float(-dt) / STDP_TAU) * rate
 			s.weight = maxf(s.base_weight * 0.2, s.weight - delta_neg)
-		s.weight = clamp(s.weight, 0.0, 255.0)
+		s.weight = clamp(s.weight, 0.0, 255.0) if s.base_weight >= 0.0 else clamp(s.weight, -255.0, 0.0)
 
 # ── Introspection helpers for visualization / UI ─────────────────────────────
 func get_potential(neuron_name: String) -> float:

@@ -40,6 +40,28 @@ var relationship: float = 0.0            # smooth 0..3 bond meter (drives ranks)
 var feed_count: int = 0
 var betrayed_count: int = 0              # times the PLAYER has struck this member (see betray())
 
+# ── BETRAYAL FATIGUE (2026-08-28) ── see the neuron comment in _brain_text().
+# Counter-stimulus queued by betray() to land on Trust exactly TWO ticks
+# later -- matching the real SawBetray -> Trust synapse's own actual arrival
+# timing, not one tick. SawBetray fires on the FIRST _brain_tick() after
+# betray() (its own stimulate() is immediate), but its synapse (delay=1)
+# doesn't arrive on Trust until the SECOND _brain_tick() after that. A first
+# draft of this queued the counter for the first following tick and measured
+# a real bug from it -- Trust briefly went POSITIVE before crashing to the
+# delayed -160 a tick later, because the counter landed a full tick before
+# the hit it was supposed to be offsetting. Each entry: ticks_left counts
+# down once per _brain_tick(); applied the instant it reaches 0, matching
+# the same tick the real -160 arrives.
+var _pending_betrayal_counters: Array = []   # [{"ticks_left": int, "amount": float}, ...]
+# How much accumulated BetrayalFatigue `w` counts as "fully fatigued" --
+# calibrated empirically (calib_probe.gd) to roughly the w reached by ONE
+# fresh betrayal event under this neuron's real params (drive=80, tau_w=5000).
+const BETRAYAL_FATIGUE_SATURATION := 0.25
+# Max points of the -160 SawBetray hit this can counter-offset, at full
+# saturation. Deliberately well under 160 -- a second betrayal should read as
+# measurably DULLER, never neutralized or reversed into a non-event.
+const BETRAYAL_FATIGUE_MAX_OFFSET := 60.0
+
 var _tick_accum: float = 0.0
 const TICK_HZ := 10.0
 var _e_was_down: bool = false
@@ -183,6 +205,30 @@ func _brain_text() -> String:
 	t += "neuron SawHelpClear  threshold=50 leak=20\n"
 	t += "neuron SawDefend     threshold=50 leak=20\n"
 	t += "neuron SawBetray     threshold=50 leak=20\n"
+	# BETRAYAL FATIGUE (2026-08-28, tribe-neuron-type-expansion.md priority 2):
+	# an ADDITIVE AdEx neuron stimulated ALONGSIDE SawBetray (see betray()
+	# below) -- not a replacement for anything, and Trust itself below is
+	# left completely untouched (same type, same leak, same synapses as
+	# always). AdEx's adaptation variable `w` grows with sustained/repeated
+	# depolarization and decays back down over its own timescale -- exactly
+	# the "measurably duller on a second hit, recovers if enough time
+	# passes" shape LIF cannot represent (LIF always resets flat to 0).
+	# threshold=0 is deliberately never reached by a single betrayal's
+	# drive=80 (calibrated empirically, see calib_probe.gd scratch run) --
+	# this neuron is used purely for its CONTINUOUS subthreshold `w` state
+	# (read via adex_adaptation()), not for discrete spiking.
+	# tau_w=5000 (5 real seconds) is a DELIBERATE game-scale retuning, not
+	# the bio-realistic 30-100ms default AdExNeuron/neurons.spk documents --
+	# calibration showed that at this project's real step_dt=0.1 (10Hz), the
+	# AdEx substep clock runs 1:1 with real wall-clock ms, so a bio-realistic
+	# tau_w decays to exactly 0.0 within a single real second, long before a
+	# player can physically trigger a second betray() -- the same
+	# "hardware-tuned constant doesn't survive translation to this game's
+	# scale" lesson Resonator's energy_time_constant already documented.
+	# 5s means a second betrayal within a few seconds is measurably
+	# dampened; a betrayal a minute later lands at full, undampened
+	# strength -- "still catching their breath," not a permanent ratchet.
+	t += "neuron BetrayalFatigue type=adex threshold=0 C=200 gL=10 EL=-70 VT=-50 delta=2 tau_w=5000 a=2 b=60 vreset=-58\n"
 	t += "neuron Trust  threshold=100 leak=%d\n" % int(p["trust_leak"])
 	t += "neuron Follow threshold=100 leak=5\n"
 	t += "synapse SawContribute -> Trust weight=%d\n" % int(p["contrib"])
@@ -2618,7 +2664,21 @@ func contribute(kind: String) -> void:
 # is a one-shot wipe, not a lingering suppression (the brain has no floor for
 # negative potential across steps; see the leak-clamp in spikeling.gd's step()).
 func betray() -> void:
+	# BETRAYAL FATIGUE: read whatever fatigue accumulated from a PRIOR
+	# betrayal (0.0 for a source's first-ever hit, or once enough real time
+	# has passed for tau_w to decay it away -- see the neuron comment above)
+	# BEFORE this event's own stimulation adds to it, then queue a partial
+	# counter-offset to land on Trust the same tick the real -160 synapse
+	# does. The -160 SawBetray->Trust synapse itself is completely
+	# unmodified below -- this only adds a separate, smaller, opposing
+	# stimulus alongside it.
+	var _fatigue_prior: float = brain.adex_adaptation("BetrayalFatigue")
+	var _counter: float = BETRAYAL_FATIGUE_MAX_OFFSET * clampf(_fatigue_prior / BETRAYAL_FATIGUE_SATURATION, 0.0, 1.0)
+	# ticks_left=1: skip the next _brain_tick() (the one where SawBetray
+	# itself fires), apply on the one after that (where its synapse arrives).
+	_pending_betrayal_counters.append({"ticks_left": 1, "amount": _counter})
 	brain.stimulate("SawBetray", 80.0)
+	brain.stimulate("BetrayalFatigue", 80.0)
 	betrayed_count += 1
 	_attend_idle_time = 0.0
 	# PLAYER REPUTATION (2026-08-28): a real negative interaction.
@@ -2675,6 +2735,19 @@ func trust_follow_mood() -> float:
 	return _trust_follow_ema
 
 func _brain_tick() -> void:
+	# BETRAYAL FATIGUE: apply any queued counter-offset(s) whose delay has
+	# elapsed NOW, immediately before step() -- lands in the exact same
+	# step() call as the real SawBetray -> Trust synapse's delay=1 arrival
+	# (see betray()'s comment), not one tick early or late.
+	if not _pending_betrayal_counters.is_empty():
+		var _still_pending: Array = []
+		for entry in _pending_betrayal_counters:
+			if entry["ticks_left"] <= 0:
+				brain.stimulate("Trust", entry["amount"])
+			else:
+				entry["ticks_left"] -= 1
+				_still_pending.append(entry)
+		_pending_betrayal_counters = _still_pending
 	var fired: Array = brain.step()
 	if not fired.is_empty():
 		_drum_fired_neurons(fired)
