@@ -25,7 +25,7 @@ extends Node
 ## compose_as() call site are untouched. REVERT: flip this to false (or
 ## delete it and the `if USE_DIRECT_VOICE_FOR_LIVE_TEST:` block in _say_to()
 ## below) to restore the normal Ollama reply for player chat.
-const USE_DIRECT_VOICE_FOR_LIVE_TEST := true
+const USE_DIRECT_VOICE_FOR_LIVE_TEST := false
 
 const TALK_RANGE := 8.0        # how close you must be to address someone
 const HOLD := 6.0              # seconds their reply stays above their head
