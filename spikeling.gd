@@ -76,6 +76,26 @@ class Neuron:
 	# per-step dt -- the exact "sample-rate bug" runtime.py's own docstring
 	# warns about, not repeated here.
 	var energy_time_constant: float = 0.5
+	# REFRACTORY (2026-08-28, opt-in, additive): a real state-changing reset
+	# on fire, opposite of the original model's own "never resets, just
+	# keeps ringing" design (see class-level comment above). Default 0.0
+	# means this field is never consulted (see _step_resonator's `if
+	# res_refr_left > 0.0` gate) -- every existing .spk brain and every
+	# existing test (test_resonator_neuron.gd, test_resonator_tribedrums_
+	# hook.gd) parses and runs byte-identically to before this was added.
+	# Config, in SECONDS (matches step_dt's own unit; the .spk key is
+	# `refractory_ms=` for human-authoring convenience, converted once at
+	# load time -- same pattern as LIF's `refractory=` ms->tick handling
+	# elsewhere in this file, just seconds instead of ticks since Resonator
+	# is physically-timed, not tick-based).
+	var res_refractory_s: float = 0.0
+	# Countdown state: seconds remaining until the energy envelope is
+	# allowed to track the real oscillator again. Decremented by step_dt
+	# each step while positive; the oscillator's own x/v are NEVER touched
+	# by this -- only the ENERGY ENVELOPE (energy_ema) is suppressed, so a
+	# still-resonant drive can rebuild real amplitude and genuinely
+	# re-cross threshold the instant the countdown ends.
+	var res_refr_left: float = 0.0
 
 	# IZHIKEVICH (2026-08-28): "type=izhikevich" -- another opt-out of the
 	# LIF path, ported from Spikeling/pyspike_neuron_models.py's
@@ -206,6 +226,11 @@ func load_from_text(text: String) -> bool:
 				n.coupling = float(_kv(line, "coupling", "1.0"))
 				n.gate_threshold = float(_kv(line, "gate_threshold", str(n.gate_threshold)))
 				n.energy_time_constant = float(_kv(line, "energy_time_constant", str(n.energy_time_constant)))
+				# REFRACTORY (2026-08-28): opt-in via `refractory_ms=`;
+				# absent/"0" -> res_refractory_s stays 0.0 -> the gate in
+				# _step_resonator is never taken -> original behavior,
+				# unchanged, for every brain that doesn't set this key.
+				n.res_refractory_s = float(_kv(line, "refractory_ms", "0")) / 1000.0
 			elif n.type == "izhikevich":
 				# Re-default `threshold` here to the model's own real spike
 				# condition (30, hardcoded in the reference -- `if v >= 30`,
@@ -383,7 +408,20 @@ func _step_resonator(n: Neuron, i: int, incoming_synaptic: Dictionary, fired_now
 
 	var alpha: float = minf(1.0, step_dt / n.energy_time_constant)
 	var was_above: bool = sqrt(n.energy_ema) >= n.threshold
-	if absf(n.res_x) >= n.gate_threshold:
+	# REFRACTORY (2026-08-28, opt-in via `refractory_ms=`, default path
+	# below unchanged): while a real countdown is active, skip the normal
+	# envelope tracking entirely and just decay it (same formula as the
+	# existing "below gate_threshold" branch) -- x/v keep integrating
+	# normally above, completely untouched, so a still-resonant drive is
+	# really still building real amplitude underneath; only the DETECTION
+	# envelope is being held down. refractory_s == 0.0 (the default) means
+	# res_refr_left can never be positive (nothing ever sets it below),
+	# so this branch is dead code for every brain that doesn't opt in --
+	# the elif/else pair below is the ORIGINAL, textually-unchanged logic.
+	if n.res_refr_left > 0.0:
+		n.res_refr_left -= step_dt
+		n.energy_ema -= alpha * n.energy_ema
+	elif absf(n.res_x) >= n.gate_threshold:
 		n.energy_ema += alpha * (n.res_x * n.res_x - n.energy_ema)
 	else:
 		n.energy_ema -= alpha * n.energy_ema  # decay only -- skip the x*x multiply
@@ -395,6 +433,16 @@ func _step_resonator(n: Neuron, i: int, incoming_synaptic: Dictionary, fired_now
 		n.fire_count += 1
 		n.last_fire_step = step_count
 		fired_now.append(n.name)
+		# REFRACTORY: the actual state-changing event on fire -- start the
+		# countdown and hard-zero the envelope right now (not just let it
+		# passively decay), the real "firing changes the neuron's own
+		# state" property every pulsed type in this file already has (LIF's
+		# p<-0, Izhikevich/AdEx's v<-reset) and the ORIGINAL Resonator
+		# (refractory_s == 0.0, the default) structurally lacks. No-op when
+		# refractory_s is 0.0 -- original behavior exactly preserved.
+		if n.res_refractory_s > 0.0:
+			n.res_refr_left = n.res_refractory_s
+			n.energy_ema = 0.0
 		# same delayed-propagation shape as the LIF branch in step() above
 		# (deliberately duplicated, not factored into a shared helper --
 		# keeps this branch fully self-contained and easy to verify against
@@ -710,8 +758,16 @@ func export_spk() -> String:
 			# (%d would truncate a sub-1.0 value to 0 and silently break
 			# re-loading), unlike the LIF branch below which is correctly
 			# integer-valued.
-			out += "neuron %s type=resonator threshold=%s freq=%s damping=%s coupling=%s\n" % [
-				n.name, str(n.threshold), str(n.freq_hz), str(n.damping), str(n.coupling)]
+			# REFRACTORY (2026-08-28): `refractory_ms=` only appended when
+			# actually set (> 0.0) -- matches this file's existing precedent
+			# (delay=, dt=) of omitting a key entirely at its default, so
+			# every resonator brain exported before this feature existed
+			# still round-trips to an identical string.
+			var refr_suffix := ""
+			if n.res_refractory_s > 0.0:
+				refr_suffix = " refractory_ms=%s" % str(n.res_refractory_s * 1000.0)
+			out += "neuron %s type=resonator threshold=%s freq=%s damping=%s coupling=%s%s\n" % [
+				n.name, str(n.threshold), str(n.freq_hz), str(n.damping), str(n.coupling), refr_suffix]
 		elif n.type == "izhikevich":
 			out += "neuron %s type=izhikevich threshold=%s a=%s b=%s c=%s d=%s\n" % [
 				n.name, str(n.threshold), str(n.iz_a), str(n.iz_b), str(n.iz_c), str(n.iz_d)]
