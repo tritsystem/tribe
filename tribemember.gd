@@ -576,6 +576,14 @@ const ARMOR_TIERS := [
 var weapon: int = 0
 var armor: int = 0
 
+# ── PLAYER REPUTATION (2026-08-28): "remembers you, reputation builds over
+# repeat interactions" -- see player_reputation.gd. Distinct from
+# `relationship` (the existing single trust scalar) -- a separate recognition
+# layer for a real PATTERN of good/bad treatment, feeding back into how fast
+# relationship itself builds.
+const PlayerReputationScript = preload("res://player_reputation.gd")
+var player_rep: PlayerReputation = PlayerReputationScript.new()
+
 # ── PROFESSIONS (2026-07-19): "30 professions, tie it all together" -- one
 # shared skill-progression mechanic every profession uses (practice ->
 # skill -> WoW-style tiered recipe unlocks -> can teach a lower-skilled
@@ -2496,6 +2504,9 @@ func contribute(kind: String) -> void:
 		"defend": brain.stimulate("SawDefend", 80.0)
 	feed_count += 1
 	_attend_idle_time = 0.0   # real interaction — reset their patience clock
+	# PLAYER REPUTATION (2026-08-28): this is a real positive interaction --
+	# feeds the recognition layer distinct from `relationship` itself.
+	player_rep.on_good_deed()
 	if trust_label:
 		trust_label.modulate = Color(0.3, 1.0, 0.3)
 	if anim: anim.pop(0.55)          # a grateful little hop
@@ -2520,6 +2531,8 @@ func betray() -> void:
 	brain.stimulate("SawBetray", 80.0)
 	betrayed_count += 1
 	_attend_idle_time = 0.0
+	# PLAYER REPUTATION (2026-08-28): a real negative interaction.
+	player_rep.on_bad_deed()
 	if trust_label:
 		trust_label.modulate = Color(1.0, 0.2, 0.2)
 	if anim: anim.pop(0.25)          # a small startled flinch (pop() only supports [0,1], no dedicated hurt anim)
@@ -2579,7 +2592,9 @@ func _brain_tick() -> void:
 	_trust_follow_ema = _trust_follow_ema * TRUST_FOLLOW_EMA_DECAY + tf * (1.0 - TRUST_FOLLOW_EMA_DECAY)
 	if "Follow" in fired:
 		follow_fires += 1
-		relationship = minf(RELATIONSHIP_MAX, relationship + FOLLOW_FIRE_REL_GAIN)
+		# PLAYER REPUTATION (2026-08-28): a real-remembered pattern of good/bad
+		# treatment speeds up or slows down how fast trust builds from here.
+		relationship = minf(RELATIONSHIP_MAX, relationship + FOLLOW_FIRE_REL_GAIN * player_rep.reputation_gain_mult())
 		_update_rank()
 		if follow_fires >= follow_threshold_hits and not is_backing_you:
 			is_backing_you = true
