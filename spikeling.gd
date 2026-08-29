@@ -35,12 +35,26 @@ class Neuron:
 	# fire_strength() right after step(); consumers (e.g. tribe_drums.gd)
 	# use it for velocity-sensitive output instead of a flat hit every time.
 	var last_fire_strength: float = 0.0
+	# STDP (2026-08-28): the step index of this neuron's most recent spike,
+	# -1 if it has never fired. Needed to compute pre/post SPIKE TIMING
+	# (not just "did both fire this step") for stdp_learn() below.
+	var last_fire_step: int = -1
 
 class Synapse:
 	var src: int                # source neuron index
 	var dst: int                # target neuron index
 	var weight: float
 	var base_weight: float      # innate weight at load — learning relaxes back toward this
+	# CONDUCTION DELAY (2026-08-28): real axons take variable time to
+	# transmit a spike depending on length/myelination -- Brian2 treats
+	# per-synapse `delay` as a first-class primitive (Synapses().delay),
+	# distinct from snnTorch/SpikingJelly's usual simplification of
+	# instantaneous (1-timestep) propagation. Previously EVERY synapse in
+	# this runtime delivered in exactly 1 step regardless of any notion of
+	# distance -- this was a real, unexamined simplification, not a
+	# deliberate design choice. delay=1 (the old default) preserves
+	# existing behavior exactly for every brain already written.
+	var delay: int = 1
 
 var neurons: Array = []                  # Array[Neuron]
 var synapses: Array = []                 # Array[Synapse]
@@ -50,6 +64,14 @@ var step_count: int = 0
 
 # spikes scheduled to arrive next step: idx -> accumulated weight
 var _pending: Dictionary = {}
+# CONDUCTION DELAY (2026-08-28): synaptic spikes now schedule for
+# step_count + s.delay, not unconditionally "next step" -- needs a queue
+# keyed by the ABSOLUTE future step they land on, not a single one-step-
+# ahead dict. _pending (above) stays as the EXTERNAL stimulate() path,
+# which is deliberately immediate (arrives the very step you call
+# stimulate() before step()) -- unchanged behavior, real axonal delay only
+# applies to synapse-to-synapse propagation, not direct sensory injection.
+var _scheduled: Dictionary = {}   # int step_count -> Dictionary[int idx -> float weight]
 
 func _idx(n: String) -> int:
 	return _name_to_idx.get(n, -1)
@@ -89,6 +111,7 @@ func load_from_text(text: String) -> bool:
 			var rest := (arrow[1] as String).strip_edges()
 			var dst_name := rest.split(" ")[0].strip_edges()
 			var w := float(_kv(line, "weight", "50"))
+			var d := int(_kv(line, "delay", "1"))
 			var si := _idx(src_name)
 			var di := _idx(dst_name)
 			if si == -1 or di == -1:
@@ -97,6 +120,7 @@ func load_from_text(text: String) -> bool:
 			var s := Synapse.new()
 			s.src = si; s.dst = di; s.weight = w
 			s.base_weight = w
+			s.delay = maxi(1, d)
 			synapses.append(s)
 
 	return neurons.size() > 0
@@ -116,7 +140,14 @@ func stimulate_idx(i: int, amount: float) -> void:
 func step() -> Array:
 	step_count += 1
 	var fired_now: Array = []
-	var next_pending: Dictionary = {}
+
+	# CONDUCTION DELAY: pull whatever synaptic spikes were scheduled to
+	# land on THIS exact step (could have been scheduled 1..N steps ago,
+	# depending on each synapse's own delay), then discard that slot --
+	# same "consume and clear" shape the old next_pending dict had, just
+	# keyed by absolute step instead of always being "the very next one".
+	var incoming_synaptic: Dictionary = _scheduled.get(step_count, {})
+	_scheduled.erase(step_count)
 
 	for i in range(neurons.size()):
 		var n: Neuron = neurons[i]
@@ -130,8 +161,9 @@ func step() -> Array:
 		n.p -= n.leak
 		if n.p < 0.0:
 			n.p = 0.0
-		# incoming stimulus (external + synaptic) scheduled for this step
-		n.p += _pending.get(i, 0.0)
+		# incoming stimulus: external (immediate, this step) + synaptic
+		# (delayed per-synapse, may have been scheduled several steps ago)
+		n.p += _pending.get(i, 0.0) + incoming_synaptic.get(i, 0.0)
 
 		# threshold check
 		if n.p >= n.threshold:
@@ -142,13 +174,20 @@ func step() -> Array:
 			n.refr_left = refractory_ticks
 			n.fired = true
 			n.fire_count += 1
+			n.last_fire_step = step_count
 			fired_now.append(n.name)
-			# propagate to targets next step
+			# propagate to targets, landing on step_count + this synapse's
+			# OWN delay -- a long-delay synapse's spike arrives later than
+			# a short one, even from the same firing event this step.
 			for s in synapses:
 				if s.src == i:
-					next_pending[s.dst] = next_pending.get(s.dst, 0.0) + s.weight
+					var arrival: int = step_count + s.delay
+					if not _scheduled.has(arrival):
+						_scheduled[arrival] = {}
+					var bucket: Dictionary = _scheduled[arrival]
+					bucket[s.dst] = bucket.get(s.dst, 0.0) + s.weight
 
-	_pending = next_pending
+	_pending.clear()
 	return fired_now
 
 # ── Hebbian-ish learning: strengthen synapses whose src AND dst fired ─────────
@@ -170,6 +209,48 @@ func learn(reward: float, rate: float = 1.0) -> void:
 		else:
 			# unused bonds slowly forget back toward their innate strength
 			s.weight = move_toward(s.weight, s.base_weight, RELAX_RATE * rate)
+		s.weight = clamp(s.weight, 0.0, 255.0)
+
+# ── STDP: real spike-timing-dependent plasticity ──────────────────────────
+# Classic exponential STDP window (Bi & Poo 1998 shape), unlike learn()'s
+# same-step co-fire rule above: this looks at WHEN src and dst last fired
+# relative to each other, not just whether both fired on the current step.
+#   pre fires BEFORE post (dt = t_post - t_pre > 0, small)  -> potentiate
+#   post fires BEFORE pre (dt = t_post - t_pre < 0, small)  -> depress
+#   |dt| beyond STDP_WINDOW steps -> no effect (too far apart to be causal)
+# This is the direction Michael's snnTorch/SpikingJelly/Brian2 suggestion
+# points toward for biological accuracy -- Brian2 in particular treats this
+# timing-dependent rule as a first-class primitive, whereas the co-fire
+# learn() above is a simplification snnTorch/SpikingJelly-style frameworks
+# also make for training speed. Kept SEPARATE from learn() (not a replace)
+# so tribe can compare both side by side rather than assume one is better.
+const STDP_WINDOW := 6          # ticks; spikes further apart than this don't interact
+const STDP_A_PLUS := 0.35       # potentiation strength (pre before post)
+const STDP_A_MINUS := 0.28      # depression strength (post before pre) -- classically
+								  # smaller-magnitude-but-present asymmetry between the two
+const STDP_TAU := 3.0           # decay time-constant (ticks) of the exponential window
+func stdp_learn(rate: float = 1.0) -> void:
+	for s in synapses:
+		var src_n: Neuron = neurons[s.src]
+		var dst_n: Neuron = neurons[s.dst]
+		var ceil_w: float = s.base_weight * GROW_CEIL
+		if src_n.last_fire_step < 0 or dst_n.last_fire_step < 0:
+			# one or both have never fired -- nothing to time against yet
+			s.weight = move_toward(s.weight, s.base_weight, RELAX_RATE * rate)
+			s.weight = clamp(s.weight, 0.0, 255.0)
+			continue
+		var dt: int = dst_n.last_fire_step - src_n.last_fire_step  # >0: pre led post
+		if dt == 0 or absi(dt) > STDP_WINDOW:
+			# simultaneous (ambiguous causality) or too far apart -- relax, don't guess
+			s.weight = move_toward(s.weight, s.base_weight, RELAX_RATE * rate)
+		elif dt > 0:
+			# src (pre) fired before dst (post) -- causal, potentiate
+			var delta: float = STDP_A_PLUS * exp(-float(dt) / STDP_TAU) * rate
+			s.weight = minf(ceil_w, s.weight + delta)
+		else:
+			# dst (post) fired before src (pre) -- anti-causal, depress
+			var delta_neg: float = STDP_A_MINUS * exp(-float(-dt) / STDP_TAU) * rate
+			s.weight = maxf(s.base_weight * 0.2, s.weight - delta_neg)
 		s.weight = clamp(s.weight, 0.0, 255.0)
 
 # ── Introspection helpers for visualization / UI ─────────────────────────────
@@ -216,7 +297,10 @@ func export_spk() -> String:
 	for n in neurons:
 		out += "neuron %s threshold=%d leak=%d\n" % [n.name, int(n.threshold), int(n.leak)]
 	for s in synapses:
-		out += "synapse %s -> %s weight=%d\n" % [neurons[s.src].name, neurons[s.dst].name, int(s.weight)]
+		if s.delay > 1:
+			out += "synapse %s -> %s weight=%d delay=%d\n" % [neurons[s.src].name, neurons[s.dst].name, int(s.weight), s.delay]
+		else:
+			out += "synapse %s -> %s weight=%d\n" % [neurons[s.src].name, neurons[s.dst].name, int(s.weight)]
 	out += "refractory=%d\n" % refractory_ticks
 	return out
 
