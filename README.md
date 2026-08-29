@@ -14,15 +14,24 @@ your own camp if you lose it.
 
 ## Spikeling — the brain
 
-`spikeling.gd` is a real leaky integrate-and-fire (LIF) spiking neural
-network, not a metaphor: each neuron has a membrane potential that leaks
-toward zero every tick, accumulates weighted input from synapses and
-external stimuli, fires when it crosses a threshold, and then sits in a
-refractory period before it can fire again. Synapses strengthen via
-Hebbian learning (`learn()`) when source and target both fire, bounded so
-weights relax back toward their innate strength instead of saturating —
-this keeps individual personalities (e.g. Wary vs Trusting) distinct over a
-long session instead of washing out.
+`spikeling.gd` is a real spiking neural network, not a metaphor. Every
+brain is built from **leaky integrate-and-fire (LIF)** neurons by
+default: a membrane potential that leaks toward zero every tick,
+accumulates weighted input from synapses and external stimuli, fires
+when it crosses a threshold, and then sits in a refractory period
+before it can fire again. Synapses strengthen via Hebbian learning
+(`learn()`) when source and target both fire, bounded so weights relax
+back toward their innate strength instead of saturating — this keeps
+individual personalities (e.g. Wary vs Trusting) distinct over a long
+session instead of washing out.
+
+Three more neuron types are also available (`type=izhikevich`,
+`type=adex`, `type=resonator`), each a faithful port of a real
+reference model, each answering a question LIF structurally can't —
+pattern-over-time, repetition fatigue, and frequency, respectively. Two
+are already wired into real gameplay behavior. See
+[`NEURON_TYPES.md`](NEURON_TYPES.md) for the real before/after, what
+each one is good and bad for, and the measured numbers behind them.
 
 Every agent type loads its own small brain from a `.spk` text config and
 steps it every tick:
