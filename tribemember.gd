@@ -229,6 +229,13 @@ func _brain_text() -> String:
 	# dampened; a betrayal a minute later lands at full, undampened
 	# strength -- "still catching their breath," not a permanent ratchet.
 	t += "neuron BetrayalFatigue type=adex threshold=0 C=200 gL=10 EL=-70 VT=-50 delta=2 tau_w=5000 a=2 b=60 vreset=-58\n"
+	# BURST TRAUMA (2026-08-28, tribe-neuron-type-expansion.md, Izhikevich hook
+	# -- see the const block above _trauma_hit_count for the full pre-
+	# registered claim). Chattering preset (c=-50, d=2 -- Izhikevich 2003's
+	# own named regime) with `a` retuned from the 0.02 literature default to
+	# 0.001 (tau=1000ms) so the recovery variable's decay lines up with this
+	# game's real-second combat pacing instead of a real neuron's ms pacing.
+	t += "neuron BurstTrauma type=izhikevich threshold=30 a=0.001 b=0.2 c=-50 d=2\n"
 	t += "neuron Trust  threshold=100 leak=%d\n" % int(p["trust_leak"])
 	t += "neuron Follow threshold=100 leak=5\n"
 	t += "synapse SawContribute -> Trust weight=%d\n" % int(p["contrib"])
@@ -886,6 +893,39 @@ const CONTRIB_SHIFT_INTERVAL := 60          # combined food+wood contribution pe
 const TRAUMA_HITS_PER_SHIFT := 3            # real hits taken per shift
 var _next_contrib_shift_at: int = CONTRIB_SHIFT_INTERVAL
 var _trauma_hit_count: int = 0
+
+# ── BURST TRAUMA (2026-08-28, tribe-neuron-type-expansion.md, Izhikevich hook)
+# PRE-REGISTERED CLAIM (stated before this was built): _trauma_hit_count
+# above only counts REAL HITS -- it has zero awareness of WHEN they landed.
+# 3 hits taken in a single rapid ambush and 3 hits taken across an hour-long,
+# on-and-off fight currently trigger the identical Wary personality shift,
+# identically -- LIF/plain counters structurally can't represent the
+# difference. An ADDITIVE Izhikevich neuron, `BurstTrauma`, stimulated
+# alongside (not instead of) the ordinary trauma count in take_hit() below,
+# will show its recovery variable `iz_u` (read via the already-existing
+# izhikevich_recovery() introspection API, no engine change needed) still
+# measurably ELEVATED (>0.0, vs a resting/fully-decayed baseline around
+# -13/-14) when a hit lands within about 1 real second of the previous one,
+# but DECAYED back near that resting baseline (<0.0) when the previous hit
+# landed 3+ real seconds earlier. Real numbers from calibration
+# (calib_burst_probe.gd, since deleted, a=0.001/tau=1000ms): prior_u=13.29 at
+# a 1.0s gap, prior_u=-11.57 at a 3.0s gap, prior_u=-14.00 at a 60s gap
+# (baseline=-13.00) -- BURST_TRAUMA_ELEVATED_U=0.0 sits cleanly between those.
+# USE: at the moment a hit lands, if BurstTrauma's iz_u (read from BEFORE
+# this hit's own stimulation, same "read prior state first" pattern as
+# BetrayalFatigue) is already elevated, this hit also adds one extra
+# "phantom" trauma count on top of the real one -- so a burst of hits
+# landing within ~1s of each other reaches TRAUMA_HITS_PER_SHIFT=3 (and the
+# Wary shift) after only 2 REAL hits, while the same 3 total hits spread 3+
+# real seconds apart still require all 3 real hits, exactly as before this
+# change. `a` (0.001) is a real, documented, game-scale retuning of the
+# 0.02 literature default -- same "hardware-tuned constant doesn't survive
+# translation to this game's scale" lesson Resonator's energy_time_constant
+# and BetrayalFatigue's tau_w already hit; c=-50/d=2 (the "chattering" preset,
+# Izhikevich 2003's own named regime, not invented) are left at their real
+# literature values, untouched.
+const BURST_TRAUMA_ELEVATED_U := 0.0
+var _trauma_burst_bonus_count: int = 0      # how many phantom counts have fired, for the test/debug read below
 
 ## this member's archetype courage score -- read by Tribemanager.dominant_ideology()
 ## to classify the tribe's emergent temperament from its actual personality mix.
@@ -1589,6 +1629,14 @@ func _update_armor_visual() -> void:
 func take_hit(dmg: float, attacker) -> void:
 	dmg *= (1.0 - armor_reduction())   # armor soaks part of the blow
 	hp -= dmg
+	# BURST TRAUMA: read BurstTrauma's recovery variable BEFORE this hit's own
+	# stimulation (same "read prior state first" pattern as BetrayalFatigue's
+	# betray()) -- captures whether the PREVIOUS hit is still "ringing" in this
+	# neuron's state right now, elevated (>BURST_TRAUMA_ELEVATED_U) only if it
+	# landed within about a real second of this one. See the pre-registered
+	# claim above _trauma_hit_count for the real calibration numbers.
+	var _burst_prior_u: float = brain.izhikevich_recovery("BurstTrauma")
+	brain.stimulate("BurstTrauma", 80.0)
 	# REAL HEARING, not just passive proximity: a hit landing is a genuine
 	# loud EVENT, broadcast at the moment it happens to every member within
 	# earshot -- including ones who can't currently SEE the fight (behind an
@@ -1611,6 +1659,16 @@ func take_hit(dmg: float, attacker) -> void:
 		anim.pop(0.5)            # flinch
 		anim.tension = 1.0       # and a moment of rattled nerves
 	_trauma_hit_count += 1
+	# BURST TRAUMA: a hit landing while the previous one is still "ringing"
+	# (BurstTrauma's iz_u still elevated from it) counts as an extra, phantom
+	# trauma hit ON TOP OF the real one -- an ambush of rapid blows reaches
+	# the Wary shift on fewer REAL hits than the same total spread out. Never
+	# fires for anyone who never takes burst damage (iz_u stays at/below the
+	# resting baseline the whole time, this branch is simply never taken,
+	# _trauma_hit_count behaves exactly as it always has).
+	if _burst_prior_u > BURST_TRAUMA_ELEVATED_U:
+		_trauma_hit_count += 1
+		_trauma_burst_bonus_count += 1
 	if _trauma_hit_count >= TRAUMA_HITS_PER_SHIFT:
 		_trauma_hit_count = 0
 		_maybe_shift_personality("Wary", "After everything I've survived, I trust the world less now.")
