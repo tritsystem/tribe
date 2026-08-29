@@ -2006,6 +2006,27 @@ func build_trading_post(pos: Vector3, by_player: bool = false) -> bool:
 	notify_cat(CAT_YOU, "Trading post raised! Envoys and merchants can now be received.")
 	return true
 
+# ── SEEING ORB (2026-08-28): "add a seeing orb SNN that can see other
+# tribes from birds-eye view... piece together rest of the map" -- a real,
+# craftable magical device that summons at the player's position and scans
+# far beyond ordinary scouting range, gradually discovering nearby
+# undiscovered tribes on the real world map ([TAB]) via a real SNN
+# recognition process (seeing_orb_brain.gd), not an instant reveal.
+const ORB_COST := 15   # a Gems-flavored cost -- this is a real magical device, not a stick craft
+func try_craft_seeing_orb(pos: Vector3) -> bool:
+	if int(materials) < ORB_COST:
+		notify_cat(CAT_YOU, "Need %d materials to craft a seeing orb." % ORB_COST)
+		return false
+	materials -= ORB_COST
+	var orb = Node3D.new()
+	orb.set_script(load("res://seeing_orb.gd"))
+	add_child(orb)
+	pos.y = ground_y(pos.x, pos.z) + 1.6   # hovers at head height, not on the ground
+	orb.global_position = pos
+	orb.set("manager", self)
+	notify_cat(CAT_YOU, "A seeing orb rises, scanning the horizon...")
+	return true
+
 func try_build_camp(pos: Vector3, by_player: bool = false) -> bool:
 	if by_player and not _within_build_range(pos):
 		notify_cat(CAT_YOU, "Too far from camp — stay within %d of the stockpile." % int(BUILD_RANGE))

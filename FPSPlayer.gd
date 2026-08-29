@@ -631,6 +631,12 @@ func _survival(delta: float) -> void:
 			f9 = Vector3(0, 0, -1)
 		manager.build_trading_post(global_position + f9.normalized() * 5.0, true)
 
+	# [=] craft a seeing orb where you stand (costs materials) -- a real
+	# SNN-driven device that gradually pieces together the map from afar,
+	# see Tribemanager.try_craft_seeing_orb()/seeing_orb_brain.gd
+	if _key_just(KEY_EQUAL) and manager and manager.has_method("try_craft_seeing_orb"):
+		manager.try_craft_seeing_orb(global_position)
+
 	if _club_model and manager and not _throw_anim_active:
 		_club_model.visible = manager.get("player_holds_club") == true
 
