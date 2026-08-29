@@ -635,17 +635,34 @@ const PROFESSION_OUTPUT := {
 }
 const PROFESSION_PRODUCE_COST := 3   # shared materials spent per unit produced
 
+## YIELD SCALES WITH SKILL (2026-08-28): skill previously only unlocked
+## flavor text (skill_tier() name) and teaching -- _practice_and_produce()
+## always granted exactly 1 unit of output regardless of tier, so a Master
+## and an Untrained crafter were equally "bountiful." This is the real gap:
+## same materials cost (PROFESSION_PRODUCE_COST doesn't change), MORE output
+## per batch as skill grows -- a genuine efficiency reward for practice, not
+## just a label. Kept as a simple, inspectable step table rather than a
+## formula, matching PROFESSIONS/SKILL_TIER_NAMES' own hand-tuned-table style.
+const YIELD_BY_TIER := [1, 1, 2, 2, 3]   # Untrained, Novice, Journeyman, Expert, Master
+func _yield_for(prof: String) -> int:
+	var idx: int = clampi(int(skill_in(prof) / SKILL_TIER_STEP), 0, SKILL_TIER_NAMES.size() - 1)
+	return YIELD_BY_TIER[idx]
+
 func _practice_and_produce(prof: String) -> bool:
 	if skill_in(prof) <= 0.0 or manager == null or not manager.has_method("spend_materials_at"):
 		return false
 	if not manager.spend_materials_at(home_pos, PROFESSION_PRODUCE_COST):
 		return false
 	var output: String = str(PROFESSION_OUTPUT.get(prof, "Goods"))
-	add_item(output)
+	var qty: int = _yield_for(prof)
+	add_item(output, qty)
 	practice_profession(prof)
-	_think("Made: %s." % output, 2.0)
+	if qty > 1:
+		_think("Made: %d %s! (skill paying off)" % [qty, output], 2.0)
+	else:
+		_think("Made: %s." % output, 2.0)
 	TribeMemory.remember(member_name, "crafted", "You",
-		"I put my %s to work and made a %s." % [prof, output], "proud", 0.02)
+		"I put my %s to work and made %s %s." % [prof, str(qty), output], "proud", 0.02)
 	return true
 
 ## Set once, by Tribemanager._make_loyal_companion(), on the very first
