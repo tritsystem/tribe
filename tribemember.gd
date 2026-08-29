@@ -568,6 +568,22 @@ const WEAPON_TIERS := [
 	{"name": "Axe",   "mult": 1.8},
 	{"name": "Wand",  "mult": 1.3},
 ]
+# BLACKSMITH_MAX_WEAPON_TIER (2026-08-28 bugfix): the last tier reachable via
+# the normal linear Club->Spear->Bow->Axe ladder (both the directed
+# craft_weapon() order and _maybe_upgrade_gear()'s random automatic raise) --
+# NOT the same thing as "last index in WEAPON_TIERS". Wand (index 4) is a
+# real, separate case: it's only ever reached through WeaponPreference's
+# favors_ranged() redirect (a member's actual combat experience), never
+# forged/ordered/auto-climbed to like the other four. Before this constant
+# existed, several places used `WEAPON_TIERS.size() - 1` as a stand-in for
+# "top of the forgeable ladder" -- that was silently correct only because
+# the array's last index and the ladder's top happened to be the same
+# number (3) until Wand was appended as a 5th entry with a different
+# acquisition path, which broke that assumption without anyone changing
+# the assuming code (craft_weapon(99) started clamping to Wand instead of
+# Axe, and the ordinary +1 upgrade ladder could silently climb a member
+# onto a "magic" weapon they never earned through combat at all).
+const BLACKSMITH_MAX_WEAPON_TIER := 3   # Axe
 const ARMOR_TIERS := [
 	{"name": "None",  "reduction": 0.0},
 	{"name": "Hide",  "reduction": 0.15},
@@ -754,10 +770,15 @@ func set_gear(w: int, a: int) -> void:
 ## Expert). A member with no practice literally cannot forge the good stuff
 ## yet, no matter how many materials are on hand -- skill has to be earned by
 ## actually crafting (see practice_profession() below), same as a real trade.
+## Clamped to BLACKSMITH_MAX_WEAPON_TIER, not WEAPON_TIERS.size() - 1: a
+## smith can't forge a Wand on request (no craft_wand order verb exists --
+## see tribe_command.gd's CRAFT_TIERS -- and it isn't a Blacksmithing
+## recipe), so an out-of-range request clamps to the top of the ladder
+## that's actually forgeable (Axe), same as before Wand existed.
 func craft_weapon(tier: int) -> bool:
 	if manager == null or not manager.has_method("spend_materials_at"):
 		return false
-	tier = clampi(tier, 0, WEAPON_TIERS.size() - 1)
+	tier = clampi(tier, 0, BLACKSMITH_MAX_WEAPON_TIER)
 	if float(tier) * SKILL_TIER_STEP > skill_in("Blacksmithing"):
 		_think("I haven't learned to forge a %s yet -- needs more practice." % str(WEAPON_TIERS[tier]["name"]), 2.2)
 		return false
@@ -2243,7 +2264,10 @@ func _auto_work(delta: float) -> void:
 	# gated craft_weapon()/craft_armor() path a player-directed order uses --
 	# real materials spent, same skill-tier gate, just self-initiated.
 	if RANK_LOYALTY.get(current_rank, 0) >= RANK_LOYALTY["Acquaintance"] and skill_in("Blacksmithing") > 0.0 and randf() < 0.15:
-		var next_weapon: int = mini(weapon + 1, WEAPON_TIERS.size() - 1)
+		# bounded to BLACKSMITH_MAX_WEAPON_TIER (Axe), not WEAPON_TIERS.size() - 1:
+		# a member already at Axe has nothing left to self-forge (Wand isn't a
+		# Blacksmithing recipe -- see craft_weapon()'s own note above).
+		var next_weapon: int = mini(weapon + 1, BLACKSMITH_MAX_WEAPON_TIER)
 		if next_weapon > weapon and craft_weapon(next_weapon):
 			return
 		var next_armor: int = mini(armor + 1, ARMOR_TIERS.size() - 1)
@@ -3597,7 +3621,12 @@ const _GEAR_MAT_COST := 4
 func _maybe_upgrade_gear() -> void:
 	if manager == null:
 		return
-	if weapon >= WEAPON_TIERS.size() - 1 and armor >= ARMOR_TIERS.size() - 1:
+	# BLACKSMITH_MAX_WEAPON_TIER, not WEAPON_TIERS.size() - 1: a member already
+	# holding a Wand (reached only via the favors_ranged() redirect below, not
+	# this early-out) still counts as weapon-maxed for the purposes of "is
+	# there anything left to auto-upgrade via the normal ladder" -- there is
+	# nothing further to raise it TO. See the same note on wmax below.
+	if weapon >= BLACKSMITH_MAX_WEAPON_TIER and armor >= ARMOR_TIERS.size() - 1:
 		return
 	if randf() > 0.35:
 		return
@@ -3622,7 +3651,12 @@ func _maybe_upgrade_gear() -> void:
 		return
 	# raise whichever track is lower (armor wins ties, so survivability comes first),
 	# respecting each track's ceiling
-	var wmax: bool = weapon >= WEAPON_TIERS.size() - 1
+	# wmax uses BLACKSMITH_MAX_WEAPON_TIER (Axe), not WEAPON_TIERS.size() - 1:
+	# the normal +1 ladder below tops out at Axe -- it must NEVER walk a
+	# member onto Wand on its own (that's a real preference, earned through
+	# actual combat, not a random roll). A member already on Wand (weapon==4)
+	# also reads as wmax here, correctly routing further upgrades to armor.
+	var wmax: bool = weapon >= BLACKSMITH_MAX_WEAPON_TIER
 	var amax: bool = armor >= ARMOR_TIERS.size() - 1
 	var raise_weapon: bool
 	if amax:
