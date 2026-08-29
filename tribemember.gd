@@ -2600,7 +2600,13 @@ func _brain_tick() -> void:
 			is_backing_you = true
 			_on_now_backing_you()
 	# strengthen trust connections that just co-fired (visible learning)
-	brain.learn(1.0, 0.5)
+	# STDP mode (2026-08-28, opt-in via ProjectSettings "tribe/use_stdp"):
+	# real spike-TIMING-dependent plasticity instead of same-step co-fire.
+	# Kept switchable, not a silent replace, so behavior can be A/B compared.
+	if ProjectSettings.get_setting("tribe/use_stdp", false):
+		brain.stdp_learn(0.5)
+	else:
+		brain.learn(1.0, 0.5)
 
 ## Called externally by Tribemanager when the TRIBE'S aggregate mood (not
 ## this member's own relationship threshold) has been low for too long --
