@@ -77,6 +77,62 @@ class Neuron:
 	# warns about, not repeated here.
 	var energy_time_constant: float = 0.5
 
+	# IZHIKEVICH (2026-08-28): "type=izhikevich" -- another opt-out of the
+	# LIF path, ported from Spikeling/pyspike_neuron_models.py's
+	# IzhikevichNeuron (the REAL, verified implementation -- core/runtime/
+	# runtime.py's NeuronState + compiler.py's grammar accept `type=
+	# Izhikevich` and document the model in core/stdlib/neurons.spk, but a
+	# direct read of runtime.py confirmed the DSL parser's NEURON_RE regex
+	# never actually captures a/b/c/d and the runtime treats every declared
+	# type as plain LIF regardless -- that stdlib line is aspirational
+	# documentation, not a wired path. pyspike_neuron_models.py is the real
+	# gap-closing implementation with its own passing self-tests, so THAT'S
+	# what's ported here, not the never-executed stdlib doc line).
+	# Two state variables instead of LIF's one: iz_v (membrane potential,
+	# analogous to LIF's `p` but with a real nonlinear ODE, not linear
+	# leak) and iz_u (a recovery variable that carries across spikes --
+	# unlike LIF, which resets flatly to 0 every time, iz_u only gets
+	# INCREMENTED by `d` on each spike and decays back on its own separate
+	# timescale, giving this model real spike-history memory LIF cannot
+	# represent at all).
+	var iz_v: float = -65.0
+	var iz_u: float = -13.0            # = b * v0, recomputed properly on load
+	var iz_a: float = 0.02             # recovery time-scale (smaller = slower u)
+	var iz_b: float = 0.2              # sensitivity of u to sub-threshold v
+	var iz_c: float = -65.0            # v is reset to this after a spike
+	var iz_d: float = 8.0              # u jumps by this after a spike
+	# Real per-outer-tick spike count (see _step_izhikevich/_step_adex):
+	# at this game's typical coarse step_dt, the real sub-millisecond model
+	# can legitimately cross threshold more than once inside a single
+	# step() call. `fired`/fired_now report "did it fire at least once
+	# this tick" (same one-event-per-step() contract every other neuron
+	# type in this file honors); this field exposes the real underlying
+	# count for a consumer that cares about the difference.
+	var last_substep_spikes: int = 0
+
+	# ADEX (2026-08-28): "type=adex" -- same rationale/source file as
+	# Izhikevich above (pyspike_neuron_models.py's AdExNeuron, the real
+	# implementation; core/runtime/runtime.py's declared-but-unwired type).
+	# Also two state variables: adex_v (membrane potential) and adex_w (an
+	# ADAPTATION variable that accumulates with every spike and actively
+	# suppresses the depolarizing current -- LIF has no analogous term at
+	# all, so identical repeated stimulation always produces an identical
+	# LIF response; AdEx's response measurably weakens over sustained
+	# firing). Parameter defaults below are Brette & Gerstner (2005)'s own
+	# published regular-spiking values, exactly matching
+	# pyspike_neuron_models.py's AdExNeuron() defaults -- not invented.
+	var adex_v: float = -70.0
+	var adex_w: float = 0.0
+	var adex_C: float = 200.0          # membrane capacitance (pF)
+	var adex_gL: float = 10.0          # leak conductance (nS)
+	var adex_EL: float = -70.0         # leak reversal / resting potential (mV)
+	var adex_VT: float = -50.0         # exponential threshold voltage (mV)
+	var adex_deltaT: float = 2.0       # exponential slope factor (mV) -- the .spk `delta=` key
+	var adex_tau_w: float = 30.0       # adaptation time constant (ms)
+	var adex_a: float = 2.0            # sub-threshold adaptation coupling (nS)
+	var adex_b: float = 60.0           # spike-triggered adaptation increment (pA)
+	var adex_vreset: float = -58.0     # v is reset to this after a spike
+
 class Synapse:
 	var src: int                # source neuron index
 	var dst: int                # target neuron index
@@ -150,6 +206,38 @@ func load_from_text(text: String) -> bool:
 				n.coupling = float(_kv(line, "coupling", "1.0"))
 				n.gate_threshold = float(_kv(line, "gate_threshold", str(n.gate_threshold)))
 				n.energy_time_constant = float(_kv(line, "energy_time_constant", str(n.energy_time_constant)))
+			elif n.type == "izhikevich":
+				# Re-default `threshold` here to the model's own real spike
+				# condition (30, hardcoded in the reference -- `if v >= 30`,
+				# not a tunable in pyspike_neuron_models.py, but exposed as
+				# an override anyway for experimentation) instead of the
+				# generic LIF-shaped "100" fallback the unconditional parse
+				# above already applied -- same reasoning as Resonator's
+				# threshold being re-scoped to its own units.
+				n.threshold = float(_kv(line, "threshold", "30"))
+				n.iz_a = float(_kv(line, "a", "0.02"))
+				n.iz_b = float(_kv(line, "b", "0.2"))
+				n.iz_c = float(_kv(line, "c", "-65"))
+				n.iz_d = float(_kv(line, "d", "8"))
+				var iz_v0 := float(_kv(line, "v0", "-65"))
+				n.iz_v = iz_v0
+				n.iz_u = n.iz_b * iz_v0   # matches IzhikevichNeuron.__init__: u0 = b * v0
+			elif n.type == "adex":
+				# Same re-default reasoning as Izhikevich above: the real
+				# AdExNeuron default spike_threshold is 0.0 (mV-scale, not
+				# the generic "100" LIF fallback).
+				n.threshold = float(_kv(line, "threshold", "0"))
+				n.adex_C = float(_kv(line, "C", "200"))
+				n.adex_gL = float(_kv(line, "gL", "10"))
+				n.adex_EL = float(_kv(line, "EL", "-70"))
+				n.adex_VT = float(_kv(line, "VT", "-50"))
+				n.adex_deltaT = float(_kv(line, "delta", "2"))
+				n.adex_tau_w = float(_kv(line, "tau_w", "30"))
+				n.adex_a = float(_kv(line, "a", "2"))
+				n.adex_b = float(_kv(line, "b", "60"))
+				n.adex_vreset = float(_kv(line, "vreset", "-58"))
+				n.adex_v = n.adex_EL
+				n.adex_w = 0.0
 			_name_to_idx[n.name] = neurons.size()
 			neurons.append(n)
 		elif line.begins_with("refractory="):
@@ -220,6 +308,18 @@ func step() -> Array:
 		# LIF code beneath is textually untouched.
 		if n.type == "resonator":
 			_step_resonator(n, i, incoming_synaptic, fired_now)
+			continue
+
+		# IZHIKEVICH / ADEX (2026-08-28): also fully separate branches, same
+		# reasoning as Resonator above -- these have their own real
+		# nonlinear ODEs (ported from pyspike_neuron_models.py) with their
+		# own reset/adaptation mechanics, so they don't share LIF's
+		# leak/threshold/refr_left machinery either.
+		if n.type == "izhikevich":
+			_step_izhikevich(n, i, incoming_synaptic, fired_now)
+			continue
+		if n.type == "adex":
+			_step_adex(n, i, incoming_synaptic, fired_now)
 			continue
 
 		if n.refr_left > 0:
@@ -306,6 +406,129 @@ func _step_resonator(n: Neuron, i: int, incoming_synaptic: Dictionary, fired_now
 					_scheduled[arrival] = {}
 				var bucket: Dictionary = _scheduled[arrival]
 				bucket[s.dst] = bucket.get(s.dst, 0.0) + s.weight
+
+# ── IZHIKEVICH: two-variable nonlinear spiking model ──────────────────────────
+# Ported from Spikeling/pyspike_neuron_models.py's IzhikevichNeuron.step() --
+# the real Izhikevich (2003) equations, same substep-Euler scheme (the
+# 0.04v^2 term is stiff enough that a single 100ms-scale outer tick would be
+# numerically unstable, so the reference sub-steps at 0.5ms and this port
+# derives the same substep count from whatever step_dt actually is, same
+# idea as Resonator deriving its energy-EMA alpha from dt instead of using a
+# fixed constant):
+#   v' = 0.04*v^2 + 5*v + 140 - u + I
+#   u' = a*(b*v - u)
+#   if v >= threshold (30 by default): v <- c, u <- u + d   (spike + reset)
+# `u` is the whole point: it is NOT reset to a fixed value like LIF's `p`,
+# it's INCREMENTED by `d` and otherwise evolves on its own a-scaled
+# timescale -- so the neuron's own recent firing history keeps shaping its
+# future response, a structural capability flat-reset LIF does not have.
+func _step_izhikevich(n: Neuron, i: int, incoming_synaptic: Dictionary, fired_now: Array) -> void:
+	var drive: float = _pending.get(i, 0.0) + incoming_synaptic.get(i, 0.0)
+	var dt_ms: float = step_dt * 1000.0
+	var substeps: int = maxi(1, int(dt_ms / 0.5))
+	var sub_dt: float = dt_ms / float(substeps)
+	var any_fired := false
+	n.last_substep_spikes = 0
+	for _s in range(substeps):
+		var dv: float = 0.04 * n.iz_v * n.iz_v + 5.0 * n.iz_v + 140.0 - n.iz_u + drive
+		var du: float = n.iz_a * (n.iz_b * n.iz_v - n.iz_u)
+		n.iz_v += dv * sub_dt
+		n.iz_u += du * sub_dt
+		if n.iz_v >= n.threshold:
+			n.last_fire_strength = clampf((n.iz_v - n.threshold) / maxf(1.0, absf(n.threshold)), 0.0, 1.0)
+			n.iz_v = n.iz_c
+			n.iz_u += n.iz_d
+			any_fired = true
+			n.last_substep_spikes += 1
+	n.fired = any_fired
+	if any_fired:
+		n.fire_count += 1
+		n.last_fire_step = step_count
+		fired_now.append(n.name)
+		# same delayed-propagation shape as LIF/Resonator above (deliberately
+		# duplicated rather than shared -- keeps each branch self-contained
+		# and easy to verify against its own reference model in isolation).
+		for s in synapses:
+			if s.src == i:
+				var arrival: int = step_count + s.delay
+				if not _scheduled.has(arrival):
+					_scheduled[arrival] = {}
+				var bucket: Dictionary = _scheduled[arrival]
+				bucket[s.dst] = bucket.get(s.dst, 0.0) + s.weight
+
+## Izhikevich-only introspection: the recovery variable `u` -- the actual
+## state that carries across spikes and makes bursting/adaptation possible.
+## 0.0 for non-Izhikevich neurons or unknown names.
+func izhikevich_recovery(neuron_name: String) -> float:
+	var i := _idx(neuron_name)
+	if i < 0 or neurons[i].type != "izhikevich":
+		return 0.0
+	return neurons[i].iz_u
+
+## Izhikevich-only introspection: raw membrane potential `v`.
+func izhikevich_potential(neuron_name: String) -> float:
+	var i := _idx(neuron_name)
+	return neurons[i].iz_v if i >= 0 else 0.0
+
+# ── ADEX: adaptive exponential integrate-and-fire ──────────────────────────
+# Ported from Spikeling/pyspike_neuron_models.py's AdExNeuron.step() -- the
+# real Brette & Gerstner (2005) equations, same 0.1ms substep scheme (the
+# exponential term is the stiff part here, same reasoning as Izhikevich's
+# 0.5ms substeps above):
+#   v' = (-gL*(v-EL) + gL*DeltaT*exp((v-VT)/DeltaT) - w + I) / C
+#   w' = (a*(v-EL) - w) / tau_w
+#   if v >= threshold: v <- vreset, w <- w + b   (spike + reset + adapt)
+# `w` is the adaptation variable: it grows by a fixed increment `b` every
+# time this neuron spikes, and that accumulated `w` subtracts directly from
+# the depolarizing current on every subsequent substep -- so repeated
+# stimulation drives progressively WEAKER responses over time (spike-
+# frequency adaptation) purely from this state, with no external cooldown
+# mechanism required. LIF's leak has no memory of past spikes at all, so it
+# cannot reproduce this regardless of how leak/threshold are tuned.
+func _step_adex(n: Neuron, i: int, incoming_synaptic: Dictionary, fired_now: Array) -> void:
+	var drive: float = _pending.get(i, 0.0) + incoming_synaptic.get(i, 0.0)
+	var dt_ms: float = step_dt * 1000.0
+	var substeps: int = maxi(1, int(dt_ms / 0.1))
+	var sub_dt: float = dt_ms / float(substeps)
+	var any_fired := false
+	n.last_substep_spikes = 0
+	for _s in range(substeps):
+		var exp_term: float = n.adex_deltaT * exp(minf(50.0, (n.adex_v - n.adex_VT) / n.adex_deltaT))
+		var dv: float = (-n.adex_gL * (n.adex_v - n.adex_EL) + n.adex_gL * exp_term - n.adex_w + drive) / n.adex_C
+		var dw: float = (n.adex_a * (n.adex_v - n.adex_EL) - n.adex_w) / n.adex_tau_w
+		n.adex_v += dv * sub_dt
+		n.adex_w += dw * sub_dt
+		if n.adex_v >= n.threshold:
+			n.last_fire_strength = clampf((n.adex_v - n.threshold) / maxf(1.0, absf(n.threshold)), 0.0, 1.0)
+			n.adex_v = n.adex_vreset
+			n.adex_w += n.adex_b
+			any_fired = true
+			n.last_substep_spikes += 1
+	n.fired = any_fired
+	if any_fired:
+		n.fire_count += 1
+		n.last_fire_step = step_count
+		fired_now.append(n.name)
+		for s in synapses:
+			if s.src == i:
+				var arrival: int = step_count + s.delay
+				if not _scheduled.has(arrival):
+					_scheduled[arrival] = {}
+				var bucket: Dictionary = _scheduled[arrival]
+				bucket[s.dst] = bucket.get(s.dst, 0.0) + s.weight
+
+## AdEx-only introspection: the adaptation variable `w` -- grows with every
+## spike and suppresses future response. 0.0 for non-AdEx neurons/unknown names.
+func adex_adaptation(neuron_name: String) -> float:
+	var i := _idx(neuron_name)
+	if i < 0 or neurons[i].type != "adex":
+		return 0.0
+	return neurons[i].adex_w
+
+## AdEx-only introspection: raw membrane potential `v`.
+func adex_potential(neuron_name: String) -> float:
+	var i := _idx(neuron_name)
+	return neurons[i].adex_v if i >= 0 else 0.0
 
 ## Resonator-only introspection: current RMS-style amplitude estimate
 ## (sqrt of the energy EMA), same units as `threshold`. 0.0 for LIF neurons
@@ -416,6 +639,11 @@ func neuron_states() -> Array:
 			# continuous waveform (res_x) for resonator neurons instead of
 			# a meaningless flat "p", without changing the LIF entries at all.
 			"type": n.type, "res_x": n.res_x, "res_amplitude": sqrt(n.energy_ema),
+			# IZHIKEVICH/ADEX (2026-08-28): also additive, default-valued
+			# (0.0) for every other neuron type -- lets the visualizer show
+			# the real recovery/adaptation state instead of nothing.
+			"iz_v": n.iz_v, "iz_u": n.iz_u,
+			"adex_v": n.adex_v, "adex_w": n.adex_w,
 		})
 	return out
 
@@ -440,6 +668,14 @@ func export_spk() -> String:
 			# integer-valued.
 			out += "neuron %s type=resonator threshold=%s freq=%s damping=%s coupling=%s\n" % [
 				n.name, str(n.threshold), str(n.freq_hz), str(n.damping), str(n.coupling)]
+		elif n.type == "izhikevich":
+			out += "neuron %s type=izhikevich threshold=%s a=%s b=%s c=%s d=%s\n" % [
+				n.name, str(n.threshold), str(n.iz_a), str(n.iz_b), str(n.iz_c), str(n.iz_d)]
+		elif n.type == "adex":
+			out += "neuron %s type=adex threshold=%s C=%s gL=%s EL=%s VT=%s delta=%s tau_w=%s a=%s b=%s vreset=%s\n" % [
+				n.name, str(n.threshold), str(n.adex_C), str(n.adex_gL), str(n.adex_EL),
+				str(n.adex_VT), str(n.adex_deltaT), str(n.adex_tau_w), str(n.adex_a),
+				str(n.adex_b), str(n.adex_vreset)]
 		else:
 			out += "neuron %s threshold=%d leak=%d\n" % [n.name, int(n.threshold), int(n.leak)]
 	for s in synapses:
@@ -463,10 +699,37 @@ func _grab(s: String, after: String, before: String) -> String:
 
 func _kv(s: String, key: String, default_val: String) -> String:
 	var k := key + "="
-	var a := s.find(k)
-	if a == -1: return default_val
-	a += k.length()
-	var b := a
-	while b < s.length() and s[b] != " ":
-		b += 1
-	return s.substr(a, b - a)
+	# REAL BUG FOUND AND FIXED HERE (2026-08-28, while porting Izhikevich/AdEx):
+	# a naive `s.find(k)` matches "key=" ANYWHERE in the line, including
+	# mid-word inside an unrelated key -- e.g. searching for "d=" (Izhikevich's
+	# `d` parameter) matches inside "threshol`d=`30" and returns 30 instead of
+	# the real d= value later in the line; searching for "a=" (AdEx's `a`
+	# parameter) matches inside "delt`a=`2" the same way. Every key used before
+	# this change (threshold, leak, type, weight, delay, freq, damping,
+	# coupling, gate_threshold, energy_time_constant) happened to never be a
+	# suffix of another key, so this was a real latent bug that only a short,
+	# collision-prone key name (single letters) actually triggered -- caught
+	# by test_izhikevich_neuron.gd genuinely failing before this fix, not by
+	# code review alone. Fix: only accept a match at a real key boundary
+	# (start of the line, or immediately preceded by whitespace) -- every
+	# existing valid `.spk` line already writes space-delimited key=value
+	# pairs, so this is a pure bugfix, not a behavior change, for every key
+	# that worked correctly before.
+	var search_from := 0
+	# Bounded by s.length() (a strictly increasing search_from guarantees
+	# termination well before that many iterations) instead of `while true`
+	# -- GDScript's static analyzer can't prove an unbounded loop always
+	# returns, which fails compilation ("Not all code paths return a value")
+	# even though this loop provably does.
+	for _iter in range(s.length() + 1):
+		var a := s.find(k, search_from)
+		if a == -1:
+			return default_val
+		if a == 0 or s[a - 1] == " ":
+			a += k.length()
+			var b := a
+			while b < s.length() and s[b] != " ":
+				b += 1
+			return s.substr(a, b - a)
+		search_from = a + 1
+	return default_val
